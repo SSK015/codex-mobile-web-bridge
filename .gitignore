@@ -1,0 +1,30 @@
+# This repository contains a live private deployment beside its public source.
+# Deny everything by default, then allow only reviewed open-source files.
+/*
+
+!/.gitignore
+!/.gitattributes
+!/.env.example
+!/README.md
+!/SECURITY.md
+!/CONTRIBUTING.md
+!/NOTICE.md
+!/package.json
+!/server.mjs
+!/app-server-client.mjs
+!/sanitizers.mjs
+!/turn-input.mjs
+
+!/public/
+!/public/**
+!/scripts/
+!/scripts/**
+!/docs/
+!/docs/**
+!/examples/
+!/examples/**
+!/test/
+!/test/**
+
+# A license will be explicitly selected before the first public release.
+!/LICENSE

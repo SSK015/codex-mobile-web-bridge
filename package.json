@@ -1,0 +1,25 @@
+{
+  "name": "codex-mobile-web-bridge",
+  "version": "0.1.0",
+  "description": "Unofficial mobile web client for a local Codex App Server",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SSK015/codex-mobile-web-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SSK015/codex-mobile-web-bridge/issues"
+  },
+  "homepage": "https://github.com/SSK015/codex-mobile-web-bridge#readme",
+  "type": "module",
+  "private": true,
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node --check server.mjs && node --check app-server-client.mjs && node --check public/app.js",
+    "test": "node test/turn-input.test.mjs && node test/sanitizers.test.mjs && node test/ui.test.mjs",
+    "release:check": "node scripts/release-check.mjs"
+  }
+}
