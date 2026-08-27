@@ -405,6 +405,12 @@ function renderThread(thread, { preserveLiveState = false } = {}) {
     note.append(retry);
     elements.messages.append(note);
   }
+  if (thread.desktopWriter) {
+    const note = document.createElement('div');
+    note.className = 'history-note desktop-writer-note';
+    note.textContent = '桌面正在使用此 task，手机已以跟随模式打开。';
+    elements.messages.append(note);
+  }
   if (thread.hasOlderTurns && thread.olderTurnsCursor && !thread.historyLoading) {
     initializeHistoryPaging(thread);
   } else if (thread.hasOlderTurns && !thread.historyLoading) {

@@ -311,4 +311,26 @@ export class CodexAppServer extends EventEmitter {
   }
 }
 
+export function isActiveWriterError(error) {
+  return /active writer/i.test(String(error?.message || ''));
+}
+
+export async function resumeThreadWithReadFallback(appServer, threadId, {
+  allowReadFallback = false,
+  resumeOptions = { excludeTurns: true },
+} = {}) {
+  try {
+    return {
+      result: await appServer.resumeThread(threadId, resumeOptions),
+      desktopWriter: false,
+    };
+  } catch (error) {
+    if (!allowReadFallback || !isActiveWriterError(error)) throw error;
+    return {
+      result: await appServer.readThread(threadId, { includeTurns: false }),
+      desktopWriter: true,
+    };
+  }
+}
+
 export { SOURCE_KINDS };

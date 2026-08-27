@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CodexAppServer } from './app-server-client.mjs';
+import { CodexAppServer, isActiveWriterError, resumeThreadWithReadFallback } from './app-server-client.mjs';
 import { safeCommandPreview, safeFileChangePreview, safePreviewText } from './sanitizers.mjs';
 import { buildTurnInput } from './turn-input.mjs';
 
@@ -337,7 +337,11 @@ async function route(request, response) {
     const threadId = decodeURIComponent(resumeMatch[1]);
     const generation = ++takeoverGeneration;
     try {
-      const result = await appServer.resumeThread(threadId, { excludeTurns: true });
+      const opened = await resumeThreadWithReadFallback(appServer, threadId, {
+        allowReadFallback: Boolean(APP_SERVER_URL),
+      });
+      const { result, desktopWriter } = opened;
+      if (desktopWriter) result.thread.mobileDesktopWriter = true;
       if (generation !== takeoverGeneration) {
         const error = new Error('这个 task 的打开请求已被更新的导航取代');
         error.statusCode = 409;
@@ -351,6 +355,7 @@ async function route(request, response) {
       const responseThread = cachedUsable
         ? { ...cached, ...result.thread, turns: cached.turns, mobileHistoryPartial: cached.mobileHistoryPartial, mobileHistoryLoading: false }
         : { ...result.thread, turns: [], mobileHistoryPartial: false, mobileHistoryLoading: true };
+      responseThread.mobileDesktopWriter = desktopWriter;
       if (cachedUsable) await prepareThreadImages(responseThread);
       if (generation !== takeoverGeneration) {
         const error = new Error('这个 task 的打开请求已被更新的导航取代');
@@ -364,13 +369,13 @@ async function route(request, response) {
       upsertThreadListEntry(result.thread);
       markThreadSeen(threadId, result.thread.updatedAt);
       const threadIsActive = (result.thread.status?.type || result.thread.status) === 'active';
-      if (!cachedFresh || threadIsActive) {
-        scheduleRecentThreadHistory(result.thread, { force: threadIsActive && cachedUsable });
+      if (!cachedFresh || threadIsActive || desktopWriter) {
+        scheduleRecentThreadHistory(result.thread, { force: desktopWriter || (threadIsActive && cachedUsable) });
       }
-      return json(response, 200, { thread: publicThread(responseThread), activeTurnId });
+      return json(response, 200, { thread: publicThread(responseThread), activeTurnId, desktopWriter });
     } catch (error) {
       if (isThreadNotFound(error)) evictThreadData(threadId);
-      if (/active writer/i.test(error.message)) {
+      if (isActiveWriterError(error)) {
         error.statusCode = 409;
         error.publicCode = 'ACTIVE_WRITER';
         error.message = '这个 task 正被桌面 Codex 使用。请在电脑上切换到另一 task 或退出 Codex，然后重试。';
@@ -924,6 +929,7 @@ function publicThread(thread) {
     hasOlderTurns: Boolean(thread.mobileHistoryPartial),
     olderTurnsCursor: thread.mobileHistoryNextCursor || null,
     eventSequence: Number(thread.mobileEventSequence || 0),
+    desktopWriter: Boolean(thread.mobileDesktopWriter),
     turns: turns.map(publicTurn),
   };
 }
