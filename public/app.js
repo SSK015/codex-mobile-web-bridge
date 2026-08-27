@@ -363,6 +363,7 @@ async function openThread(threadId, { fromHistory = false } = {}) {
       state.activeThread = result.thread;
       renderThread(result.thread);
     }
+    clearStaleThreadNotFoundNotice();
     syncComposerState();
     await reportViewState();
     if (requestId !== state.threadOpenRequest) return;
@@ -1394,6 +1395,7 @@ function handleEvent(event) {
     state.deferredThreadSnapshot = null;
     state.activeThread = event.thread;
     renderThread(event.thread);
+    clearStaleThreadNotFoundNotice();
     queueThreadRefresh();
     return;
   }
@@ -1509,7 +1511,14 @@ function handleEvent(event) {
     }
     renderApprovals();
   }
-  if (method === 'error') showNotice(params.error?.message || 'Codex 出错');
+  if (method === 'error') {
+    const message = params.error?.message || 'Codex 出错';
+    if (isThreadNotFoundMessage(message) && state.activeThread && messageNodes().length > 0) {
+      clearStaleThreadNotFoundNotice();
+      return;
+    }
+    showNotice(message);
+  }
 }
 
 function handleDeletedThread(threadId) {
@@ -2230,6 +2239,16 @@ function showNotice(text) {
   elements.notice.classList.remove('hidden');
 }
 
+function isThreadNotFoundMessage(text) {
+  return /thread not found:/i.test(String(text || ''));
+}
+
+function clearStaleThreadNotFoundNotice() {
+  if (!isThreadNotFoundMessage(elements.notice.textContent)) return;
+  elements.notice.textContent = '';
+  elements.notice.classList.add('hidden');
+}
+
 function distanceFromBottom() {
   return Math.max(0, elements.messages.scrollHeight - elements.messages.scrollTop - elements.messages.clientHeight);
 }
@@ -2312,4 +2331,4 @@ function debounce(fn, wait) {
   };
 }
 
-export { decodeCharacterReferences, renderMarkdown, renderMessageImages, renderArtifacts, clipboardImageFiles, prepareClipboardImages, updateLiveToolGroup, updateLiveToolProgress, openThread, showThreadList, handleEvent, syncComposerState, loadOlderTurns, updateJumpBottom, scrollBottom, jumpToLatest, state };
+export { decodeCharacterReferences, renderMarkdown, renderMessageImages, renderArtifacts, clipboardImageFiles, prepareClipboardImages, updateLiveToolGroup, updateLiveToolProgress, openThread, showThreadList, handleEvent, syncComposerState, loadOlderTurns, updateJumpBottom, scrollBottom, jumpToLatest, isThreadNotFoundMessage, clearStaleThreadNotFoundNotice, state };

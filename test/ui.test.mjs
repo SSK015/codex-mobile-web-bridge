@@ -183,7 +183,7 @@ globalThis.requestAnimationFrame = (callback) => callback();
 globalThis.CSS = { escape: (value) => String(value) };
 globalThis.fetch = async () => ({ ok: false, status: 401, json: async () => ({ error: 'test' }) });
 
-const { renderMarkdown, renderMessageImages, renderArtifacts, clipboardImageFiles, prepareClipboardImages, updateLiveToolGroup, openThread, handleEvent, syncComposerState, loadOlderTurns, updateJumpBottom, scrollBottom, state } = await import('../public/app.js');
+const { renderMarkdown, renderMessageImages, renderArtifacts, clipboardImageFiles, prepareClipboardImages, updateLiveToolGroup, openThread, handleEvent, syncComposerState, loadOlderTurns, updateJumpBottom, scrollBottom, isThreadNotFoundMessage, clearStaleThreadNotFoundNotice, state } = await import('../public/app.js');
 assert.equal(history.state.codexMobileView, 'list');
 await openThread('thread-navigation-test');
 assert.equal(history.state.codexMobileView, 'thread');
@@ -205,6 +205,14 @@ scrollBottom({ force: true });
 assert.equal(state.followLatest, true);
 assert.ok(jumpBottom.classList.contains('hidden'));
 messagePane.replaceChildren();
+
+const notice = document.querySelector('#notice');
+notice.textContent = 'thread not found: synthetic-thread';
+notice.classList.remove('hidden');
+assert.equal(isThreadNotFoundMessage(notice.textContent), true);
+clearStaleThreadNotFoundNotice();
+assert.equal(notice.textContent, '');
+assert.ok(notice.classList.contains('hidden'));
 
 const root = new FakeNode('div');
 const source = [
