@@ -87,6 +87,7 @@ const appServer = new CodexAppServer({
 const sseClients = new Set();
 const threadCache = new Map();
 const threadCacheSizes = new Map();
+const desktopWriterThreadIds = new Set();
 const THREAD_CACHE_MAX_ENTRIES = 12;
 const THREAD_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 const THREAD_CACHE_MAX_ITEM_BYTES = 32 * 1024 * 1024;
@@ -341,7 +342,12 @@ async function route(request, response) {
         allowReadFallback: Boolean(APP_SERVER_URL),
       });
       const { result, desktopWriter } = opened;
-      if (desktopWriter) result.thread.mobileDesktopWriter = true;
+      if (desktopWriter) {
+        desktopWriterThreadIds.add(threadId);
+        result.thread.mobileDesktopWriter = true;
+      } else {
+        desktopWriterThreadIds.delete(threadId);
+      }
       if (generation !== takeoverGeneration) {
         const error = new Error('这个 task 的打开请求已被更新的导航取代');
         error.statusCode = 409;
@@ -558,6 +564,7 @@ async function route(request, response) {
       error.statusCode = 409;
       throw error;
     }
+    await ensureWritableThread(threadId);
     const body = await readJson(request);
     const text = String(body.text || '').trim();
     const attachments = await resolveUploadAttachments(threadId, body.attachments);
@@ -573,11 +580,23 @@ async function route(request, response) {
         error.statusCode = 409;
         throw error;
       }
-      const result = await appServer.steerTurn(threadId, activeTurnId, input);
+      let result;
+      try {
+        result = await appServer.steerTurn(threadId, activeTurnId, input);
+      } catch (error) {
+        if (APP_SERVER_URL && (isActiveWriterError(error) || isThreadNotFound(error))) throw createDesktopWriterError();
+        throw error;
+      }
       attachments.forEach((attachment) => { attachment.claimed = true; });
       return json(response, 202, { turn: { id: result.turnId }, steered: true });
     }
-    const result = await appServer.startTurn(threadId, input);
+    let result;
+    try {
+      result = await appServer.startTurn(threadId, input);
+    } catch (error) {
+      if (APP_SERVER_URL && (isActiveWriterError(error) || isThreadNotFound(error))) throw createDesktopWriterError();
+      throw error;
+    }
     attachments.forEach((attachment) => { attachment.claimed = true; });
     activeTurnId = result.turn?.id || null;
     activeTurnThreadId = activeTurnId ? threadId : null;
@@ -587,6 +606,7 @@ async function route(request, response) {
   const interruptMatch = pathname.match(/^\/api\/threads\/([^/]+)\/interrupt$/);
   if (request.method === 'POST' && interruptMatch) {
     const threadId = decodeURIComponent(interruptMatch[1]);
+    await ensureWritableThread(threadId);
     const body = await readJson(request);
     let turnId = body.turnId || activeTurnId;
     try {
@@ -1025,8 +1045,37 @@ function isThreadNotFound(error) {
   return /not found|unknown thread|does not exist|deleted/i.test(String(error?.message || ''));
 }
 
+function createDesktopWriterError() {
+  const error = new Error('桌面 Codex 正持有这个 task 的写入权。当前网页可跟随查看；请先在桌面切换到其他 task，再从手机发送。');
+  error.statusCode = 409;
+  error.publicCode = 'DESKTOP_WRITER';
+  return error;
+}
+
+async function ensureWritableThread(threadId) {
+  const cached = getCachedThread(threadId);
+  if (!desktopWriterThreadIds.has(threadId) && !cached?.mobileDesktopWriter) return;
+  try {
+    const result = await appServer.resumeThread(threadId, { excludeTurns: true });
+    const writable = {
+      ...cached,
+      ...result.thread,
+      turns: cached.turns,
+      mobileDesktopWriter: false,
+      mobileHistoryLoading: false,
+    };
+    desktopWriterThreadIds.delete(threadId);
+    setCachedThread(threadId, writable);
+    broadcast({ type: 'threadSnapshot', thread: publicThread(writable) });
+  } catch (error) {
+    if (isActiveWriterError(error) || isThreadNotFound(error)) throw createDesktopWriterError();
+    throw error;
+  }
+}
+
 function evictThreadData(threadId) {
   if (!threadId) return;
+  desktopWriterThreadIds.delete(threadId);
   threadHistoryForceRequests.delete(threadId);
   const nextEvictionGeneration = (threadHistoryEvictionGenerations.get(threadId) || 0) + 1;
   threadHistoryEvictionGenerations.delete(threadId);
