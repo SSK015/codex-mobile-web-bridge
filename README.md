@@ -195,6 +195,27 @@ experimental. When reporting a compatibility issue, include the Codex version,
 operating system, transport mode, and a redacted message shape. Never include a
 real task transcript or credential.
 
+### Verified environment
+
+The following combination has passed real Desktop/mobile tests. This is a
+verified baseline, not a claim that other combinations are incompatible.
+
+| Component | Verified version | Status |
+|---|---|---|
+| Operating system | Windows 11 Home Chinese, 25H2, x64, build `26200.9168` | Verified |
+| Codex Desktop | Microsoft Store MSIX `26.820.9563.0` | Verified |
+| Codex CLI bundled with Desktop | `codex-cli 0.150.0-alpha.8` | Verified |
+| Desktop-control transport | Native `codex_app` tools pipe with Desktop as the sole writer | Verified |
+| Mobile browsers | Chromium-based Android/HarmonyOS browser | Verified manually |
+| macOS | Not yet tested | Unverified |
+| Linux | Not yet tested | Unverified |
+| Other Codex Desktop releases | Run the update checklist before enabling writes | Unverified |
+
+The verified Desktop-control implementation currently auto-discovers the
+native tools pipe on Windows. Portable private-stdio/App Server code exists,
+but it must not be presented as equivalent to controlling the live Desktop
+task until that platform has passed the same acceptance tests.
+
 Before accepting a Codex Desktop update, follow the
 [Codex update checklist](docs/codex-update-checklist.md). It records the
 known-good version and tool catalog, verifies idle and active-turn messaging,
