@@ -4,6 +4,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CodexAppServer, isActiveWriterError, resumeThreadWithReadFallback } from './app-server-client.mjs';
+import { AppServerRpcMultiplexer } from './rpc-multiplexer.mjs';
 import { safeCommandPreview, safeFileChangePreview, safePreviewText } from './sanitizers.mjs';
 import { buildTurnInput } from './turn-input.mjs';
 
@@ -11,6 +12,7 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
 const CODEX_PATH = process.env.CODEX_MOBILE_CODEX_PATH || (process.platform === 'win32' ? 'codex.exe' : 'codex');
 const APP_SERVER_URL = process.env.CODEX_MOBILE_APP_SERVER_URL || '';
+const RPC_MUX_LISTEN_URL = process.env.CODEX_MOBILE_RPC_MUX_LISTEN_URL || '';
 const HOST = process.env.CODEX_MOBILE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CODEX_MOBILE_PORT || 4780);
 const SECRET_FILE = process.env.CODEX_MOBILE_SECRET_FILE || '';
@@ -79,10 +81,17 @@ const IMAGE_ALLOWED_ROOTS = [...new Set([
 const seenState = loadSeenState();
 const threadListCache = loadThreadListCache();
 
+if (RPC_MUX_LISTEN_URL && !APP_SERVER_URL) {
+  throw new Error('CODEX_MOBILE_RPC_MUX_LISTEN_URL requires CODEX_MOBILE_APP_SERVER_URL');
+}
+const rpcMux = RPC_MUX_LISTEN_URL
+  ? new AppServerRpcMultiplexer({ upstreamUrl: APP_SERVER_URL, listenUrl: RPC_MUX_LISTEN_URL })
+  : null;
 const appServer = new CodexAppServer({
   codexPath: CODEX_PATH,
   cwd: process.cwd(),
-  websocketUrl: APP_SERVER_URL || null,
+  websocketUrl: rpcMux ? null : (APP_SERVER_URL || null),
+  rpcTransport: rpcMux?.createInternalTransport() || null,
 });
 const sseClients = new Set();
 const threadCache = new Map();
@@ -196,6 +205,7 @@ appServer.on('serverRequest', (message) => {
 });
 appServer.on('exit', (event) => broadcast({ type: 'appServerExit', event }));
 appServer.on('error', (error) => broadcast({ type: 'appServerError', message: error.message }));
+rpcMux?.on('error', (error) => console.error(`RPC multiplexer error: ${error.message}`));
 appServer.on('exit', (event) => {
   if (APP_SERVER_URL && !event.intentional) {
     console.error(`Shared App Server connection exited unexpectedly (${event.code ?? 'unknown'}); restarting bridge process.`);
@@ -203,7 +213,13 @@ appServer.on('exit', (event) => {
   }
 });
 
-await appServer.start();
+if (rpcMux) await rpcMux.start();
+try {
+  await appServer.start();
+} catch (error) {
+  await rpcMux?.stop();
+  throw error;
+}
 await cleanupOrphanedUploadFiles();
 
 const server = http.createServer(async (request, response) => {
@@ -218,7 +234,7 @@ const server = http.createServer(async (request, response) => {
 server.listen(PORT, HOST, () => {
   console.log(`Codex Mobile Web listening on http://${HOST}:${PORT}`);
   console.log(`Authentication: ${secret ? 'enabled' : 'disabled (loopback testing only)'}`);
-  console.log(`App Server transport: ${APP_SERVER_URL ? 'shared WebSocket' : 'private stdio'}`);
+  console.log(`App Server transport: ${rpcMux ? `single-connection RPC mux at ${rpcMux.boundUrl}` : (APP_SERVER_URL ? 'shared WebSocket' : 'private stdio')}`);
 });
 
 async function route(request, response) {
@@ -250,7 +266,8 @@ async function route(request, response) {
       activeThreadId,
       activeTurnId,
       authEnabled: Boolean(secret),
-      appServerTransport: APP_SERVER_URL ? 'websocket' : 'stdio',
+      appServerTransport: rpcMux ? 'rpc-mux' : (APP_SERVER_URL ? 'websocket' : 'stdio'),
+      ...(rpcMux ? { rpcMux: rpcMux.stats } : {}),
     });
   }
 
@@ -339,7 +356,7 @@ async function route(request, response) {
     const generation = ++takeoverGeneration;
     try {
       const opened = await resumeThreadWithReadFallback(appServer, threadId, {
-        allowReadFallback: Boolean(APP_SERVER_URL),
+        allowReadFallback: Boolean(APP_SERVER_URL) && !rpcMux,
       });
       const { result, desktopWriter } = opened;
       if (desktopWriter) {
@@ -381,7 +398,7 @@ async function route(request, response) {
       return json(response, 200, { thread: publicThread(responseThread), activeTurnId, desktopWriter });
     } catch (error) {
       if (isThreadNotFound(error)) evictThreadData(threadId);
-      if (isActiveWriterError(error)) {
+      if (!rpcMux && isActiveWriterError(error)) {
         error.statusCode = 409;
         error.publicCode = 'ACTIVE_WRITER';
         error.message = '这个 task 正被桌面 Codex 使用。请在电脑上切换到另一 task 或退出 Codex，然后重试。';
@@ -584,7 +601,7 @@ async function route(request, response) {
       try {
         result = await appServer.steerTurn(threadId, activeTurnId, input);
       } catch (error) {
-        if (APP_SERVER_URL && (isActiveWriterError(error) || isThreadNotFound(error))) throw createDesktopWriterError();
+        if (APP_SERVER_URL && !rpcMux && (isActiveWriterError(error) || isThreadNotFound(error))) throw createDesktopWriterError();
         throw error;
       }
       attachments.forEach((attachment) => { attachment.claimed = true; });
@@ -594,7 +611,7 @@ async function route(request, response) {
     try {
       result = await appServer.startTurn(threadId, input);
     } catch (error) {
-      if (APP_SERVER_URL && (isActiveWriterError(error) || isThreadNotFound(error))) throw createDesktopWriterError();
+      if (APP_SERVER_URL && !rpcMux && (isActiveWriterError(error) || isThreadNotFound(error))) throw createDesktopWriterError();
       throw error;
     }
     attachments.forEach((attachment) => { attachment.claimed = true; });
@@ -2327,6 +2344,7 @@ function serveStatic(pathname, response) {
 async function shutdown() {
   server.close();
   await appServer.stop();
+  await rpcMux?.stop();
   process.exit(0);
 }
 process.on('SIGINT', shutdown);

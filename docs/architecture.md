@@ -1,10 +1,13 @@
 # Architecture
 
 ```text
-mobile browser -- HTTPS/private network --> bridge -- stdio or loopback WS --> Codex App Server
+mobile browser -- HTTPS --> bridge ----\
+                                       RPC mux == one WS ==> Codex App Server
+Codex Desktop -------- local WS -------/
 ```
 
-The bridge is a dependency-free Node.js server and a static mobile web client.
+The bridge is a Node.js server and a static mobile web client. Its only runtime
+package is `ws`, used for the loopback multiplexer server.
 It does not call the OpenAI API directly. Authentication and model access remain
 owned by the user's installed Codex environment.
 
@@ -16,12 +19,19 @@ The default starts `codex app-server --stdio` as a child process. This is the
 simplest portable mode. Another Codex client may be unable to write the same
 task concurrently.
 
-### Shared WebSocket (advanced and experimental)
+### Single-connection RPC mux (recommended, experimental)
 
-Set `CODEX_MOBILE_APP_SERVER_URL` to connect to an existing loopback App Server.
-This can let multiple clients observe one server, but desktop integration and
-protocol compatibility depend on the installed Codex version. Never expose the
-App Server WebSocket itself to the network.
+Set `CODEX_MOBILE_APP_SERVER_URL` to the upstream loopback App Server and
+`CODEX_MOBILE_RPC_MUX_LISTEN_URL` to a second loopback endpoint used by Desktop.
+The mux remaps request IDs, caches the single initialize response, broadcasts
+notifications, and routes server requests. Desktop integration and protocol
+compatibility depend on the installed Codex version. Never expose either
+WebSocket to the network.
+
+Two direct WebSocket connections to one App Server are not equivalent: current
+builds bind active task writer state to the connection. The mux keeps one
+physical upstream connection so Desktop-owned tasks remain writable from the
+phone.
 
 ## Data flow
 

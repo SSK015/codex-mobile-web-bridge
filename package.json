@@ -18,8 +18,12 @@
   },
   "scripts": {
     "start": "node server.mjs",
-    "check": "node --check server.mjs && node --check app-server-client.mjs && node --check public/app.js",
-    "test": "node test/turn-input.test.mjs && node test/sanitizers.test.mjs && node test/app-server-client.test.mjs && node test/ui.test.mjs",
+    "check": "node --check server.mjs && node --check app-server-client.mjs && node --check rpc-multiplexer.mjs && node --check public/app.js",
+    "test": "node test/turn-input.test.mjs && node test/sanitizers.test.mjs && node test/app-server-client.test.mjs && node test/rpc-multiplexer.test.mjs && node test/ui.test.mjs",
+    "test:mux:real": "node test/rpc-multiplexer.real-smoke.mjs",
     "release:check": "node scripts/release-check.mjs"
+  },
+  "dependencies": {
+    "ws": "8.21.3"
   }
 }

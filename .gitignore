@@ -10,8 +10,10 @@
 !/CONTRIBUTING.md
 !/NOTICE.md
 !/package.json
+!/package-lock.json
 !/server.mjs
 !/app-server-client.mjs
+!/rpc-multiplexer.mjs
 !/sanitizers.mjs
 !/turn-input.mjs
 

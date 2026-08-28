@@ -11,3 +11,7 @@ or any other OpenAI binary or service.
 
 The bridge currently uses experimental Codex App Server messages. Compatibility
 may change when users update Codex.
+
+This distribution depends on the `ws` WebSocket library, available under the
+MIT License. Its copyright and license text are included in the installed npm
+package.

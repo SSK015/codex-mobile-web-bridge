@@ -15,8 +15,9 @@ Minimum requirements:
 - A modern JavaScript browser
 
 Start the bridge and open `http://127.0.0.1:4780` on the same computer. No API
-separate OpenAI API key, database, package installation, VPS, domain, or TLS
-certificate is needed. The bridge uses the user's existing Codex authentication.
+separate OpenAI API key, database, VPS, domain, or TLS certificate is needed.
+Run `npm install` once to install the `ws` WebSocket package. The bridge uses the
+user's existing Codex authentication.
 
 This private-stdio setup proves that the bridge can run, but it starts a second
 independent Codex client. It is not the intended default experience when Codex
@@ -73,21 +74,28 @@ CODEX_MOBILE_COOKIE_PATH=/codex-mobile/
 A VPS and public domain are one possible implementation, not a project
 requirement. The project does not provide or operate a relay service.
 
-## Recommended default: desktop and phone share one App Server
+## Recommended default: desktop and phone share one App Server connection
 
 This is required for the complete experience demonstrated by this project.
 Private stdio remains available only as a portable fallback.
 
-Shared mode additionally requires:
+Single-connection shared mode additionally requires:
 
 - a Codex App Server listening on a loopback WebSocket; and
-- every participating client configured to use that same server.
+- a second loopback port for the RPC multiplexer; and
+- Codex Desktop configured to use the multiplexer rather than the upstream App
+  Server directly.
 
-Set `CODEX_MOBILE_APP_SERVER_URL`, for example:
+Set both bridge variables, for example:
 
 ```shell
-CODEX_MOBILE_APP_SERVER_URL=ws://127.0.0.1:4512 node server.mjs
+CODEX_MOBILE_APP_SERVER_URL=ws://127.0.0.1:4512 \
+CODEX_MOBILE_RPC_MUX_LISTEN_URL=ws://127.0.0.1:4513 \
+node server.mjs
 ```
+
+Desktop must connect to `ws://127.0.0.1:4513`. Pointing Desktop and the bridge
+at `4512` as two independent WebSocket clients does not share writer ownership.
 
 Shared desktop/mobile operation is experimental and version-dependent. The
 repository does not patch or redistribute Codex Desktop.
@@ -98,7 +106,7 @@ clients can also compete for the same task's persisted state.
 
 ## Resource footprint
 
-- No runtime npm dependencies
+- One runtime npm dependency: `ws`
 - Source package is currently under 100 KiB compressed
 - Persistent metadata is small; uploaded attachments use their actual size
 - Individual uploads are limited to 25 MiB

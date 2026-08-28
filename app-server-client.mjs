@@ -16,11 +16,12 @@ const SOURCE_KINDS = [
 ];
 
 export class CodexAppServer extends EventEmitter {
-  constructor({ codexPath, cwd, websocketUrl = null }) {
+  constructor({ codexPath, cwd, websocketUrl = null, rpcTransport = null }) {
     super();
     this.codexPath = codexPath;
     this.cwd = cwd;
     this.websocketUrl = websocketUrl;
+    this.rpcTransport = rpcTransport;
     this.child = null;
     this.ws = null;
     this.nextId = 1;
@@ -28,27 +29,48 @@ export class CodexAppServer extends EventEmitter {
     this.serverRequests = new Map();
     this.ready = false;
     this.stopping = false;
+    this.rpcTransportHandlersAttached = false;
   }
 
   async start() {
-    if (this.child || this.ws) return;
+    if (this.child || this.ws || this.rpcTransport?.active) return;
     this.stopping = false;
-    if (this.websocketUrl) await this.#startWebSocket();
-    else this.#startStdio();
+    if (this.rpcTransport) {
+      this.#startRpcTransport();
+      await this.rpcTransport.start();
+    } else {
+      if (this.websocketUrl) await this.#startWebSocket();
+      else this.#startStdio();
 
-    await this.request('initialize', {
-      clientInfo: {
-        name: 'codex-mobile-web',
-        title: 'Codex Mobile Web',
-        version: '0.2.0',
-      },
-      capabilities: {
-        experimentalApi: true,
-      },
-    });
-    this.notify('initialized', {});
+      await this.request('initialize', {
+        clientInfo: {
+          name: 'codex-mobile-web',
+          title: 'Codex Mobile Web',
+          version: '0.2.0',
+        },
+        capabilities: {
+          experimentalApi: true,
+        },
+      });
+      this.notify('initialized', {});
+    }
     this.ready = true;
     this.emit('ready');
+  }
+
+  #startRpcTransport() {
+    if (this.rpcTransportHandlersAttached) return;
+    this.rpcTransportHandlersAttached = true;
+    const transport = this.rpcTransport;
+    transport.on('message', (message) => this.#handleMessage(message));
+    transport.on('error', (error) => this.emit('error', error));
+    transport.on('log', (message) => this.emit('log', message));
+    transport.on('close', (event = {}) => {
+      if (this.rpcTransport !== transport) return;
+      this.#rejectPending(new Error(`Codex App Server RPC transport closed (${event.code ?? 'unknown'}${event.reason ? `: ${event.reason}` : ''})`));
+      this.ready = false;
+      this.emit('exit', { ...event, intentional: this.stopping });
+    });
   }
 
   #startStdio() {
@@ -129,8 +151,14 @@ export class CodexAppServer extends EventEmitter {
   }
 
   async stop() {
-    if (!this.child && !this.ws) return;
+    if (!this.child && !this.ws && !this.rpcTransport?.active) return;
     this.stopping = true;
+    if (this.rpcTransport?.active) {
+      await this.rpcTransport.stop();
+      this.#rejectPending(new Error('Codex App Server RPC transport stopped'));
+      this.ready = false;
+      return;
+    }
     if (this.ws) {
       const ws = this.ws;
       await new Promise((resolve) => {
@@ -171,7 +199,13 @@ export class CodexAppServer extends EventEmitter {
         reject(new Error(`${method} timed out`));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer, method });
-      this.#write(message);
+      try {
+        this.#write(message);
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(error);
+      }
     });
   }
 
@@ -254,6 +288,10 @@ export class CodexAppServer extends EventEmitter {
   }
 
   #write(message) {
+    if (this.rpcTransport?.ready) {
+      this.rpcTransport.send(message);
+      return;
+    }
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(message));
       return;
@@ -266,7 +304,7 @@ export class CodexAppServer extends EventEmitter {
   }
 
   #isWritable() {
-    return this.ws?.readyState === WebSocket.OPEN || Boolean(this.child?.stdin?.writable);
+    return Boolean(this.rpcTransport?.ready) || this.ws?.readyState === WebSocket.OPEN || Boolean(this.child?.stdin?.writable);
   }
 
   #rejectPending(error) {
