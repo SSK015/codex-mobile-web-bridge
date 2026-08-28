@@ -77,6 +77,7 @@ const tools = ['list_threads', 'read_thread', 'send_message_to_thread']
 const calls = [];
 let sentAt = 0;
 let readAfterSendCount = 0;
+let omitCompletedItems = false;
 
 function currentTurns() {
   if (!sentAt) return [];
@@ -85,7 +86,9 @@ function currentTurns() {
   return [{
     id: turnId,
     status: completed ? 'completed' : 'inProgress',
-    items: completed ? [{ id: 'answer', type: 'agentMessage', text: 'DESKTOP_CONTROL_SERVER_OK' }] : [],
+    items: completed && !omitCompletedItems
+      ? [{ id: 'answer', type: 'agentMessage', text: 'DESKTOP_CONTROL_SERVER_OK' }]
+      : [],
   }];
 }
 
@@ -207,6 +210,11 @@ try {
     JSON.stringify(body).includes('DESKTOP_CONTROL_SERVER_OK')
   ));
   assert.match(JSON.stringify(finalThread), /DESKTOP_CONTROL_SERVER_OK/);
+  omitCompletedItems = true;
+  await delay(250);
+  const refreshedThread = await requestJson(`${bridgeBaseUrl}/api/threads/${threadId}`);
+  assert.equal(refreshedThread.status, 200);
+  assert.match(JSON.stringify(refreshedThread.body), /DESKTOP_CONTROL_SERVER_OK/);
   assert.equal(calls.filter((call) => call.tool === 'send_message_to_thread').length, 1);
   assert.ok(calls.some((call) => call.tool === 'list_threads'));
   assert.ok(calls.some((call) => call.tool === 'read_thread'));

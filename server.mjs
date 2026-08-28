@@ -303,7 +303,7 @@ async function route(request, response) {
       appServerTransport: DESKTOP_CONTROL_MODE ? 'desktop-control' : (rpcMux ? 'rpc-mux' : (APP_SERVER_URL ? 'websocket' : 'stdio')),
       capabilities: {
         createThread: !DESKTOP_CONTROL_MODE,
-        steerTurn: !DESKTOP_CONTROL_MODE,
+        steerTurn: true,
         interruptTurn: !DESKTOP_CONTROL_MODE,
         approvals: !DESKTOP_CONTROL_MODE,
         attachments: true,
@@ -635,17 +635,6 @@ async function route(request, response) {
       }
       const input = buildTurnInput(text, attachments);
       if (activeTurnId && activeTurnThreadId === threadId) {
-        if (DESKTOP_CONTROL_MODE) {
-          const error = new Error('桌面 Codex 正在运行这个 task；请等待当前回复结束后再发送。');
-          error.statusCode = 409;
-          error.publicCode = 'TURN_ACTIVE';
-          throw error;
-        }
-        if (activeTurnId === true) {
-          const error = new Error('正在恢复运行中的回复，请稍后再追加');
-          error.statusCode = 409;
-          throw error;
-        }
         let result;
         try {
           result = await appServer.steerTurn(threadId, activeTurnId, input);
@@ -1062,6 +1051,21 @@ function setCachedThread(threadId, thread) {
   return true;
 }
 
+function mergeTurnHistory(cachedTurns, incomingTurns) {
+  const cachedById = new Map((cachedTurns || []).map((turn) => [String(turn?.id || ''), turn]));
+  return (incomingTurns || []).map((turn) => {
+    const cached = cachedById.get(String(turn?.id || ''));
+    if (!cached) return turn;
+    const incomingItems = Array.isArray(turn?.items) ? turn.items : [];
+    const cachedItems = Array.isArray(cached?.items) ? cached.items : [];
+    return {
+      ...cached,
+      ...turn,
+      items: incomingItems.length > 0 ? incomingItems : cachedItems,
+    };
+  });
+}
+
 function deleteCachedThread(threadId) {
   if (!threadId) return;
   threadCache.delete(threadId);
@@ -1207,9 +1211,10 @@ function scheduleRecentThreadHistory(metadata, { force = false } = {}) {
   const promise = (async () => {
     try {
       const page = await appServer.listTurns(threadId, { limit: 24, sortDirection: 'desc', itemsView: 'full' });
+      const cached = getCachedThread(threadId);
       const thread = {
         ...metadata,
-        turns: [...(page.data || [])].reverse(),
+        turns: mergeTurnHistory(cached?.turns, [...(page.data || [])].reverse()),
         mobileEventSequence: appServerEventSequence,
         mobileHistoryLoading: false,
         mobileHistoryError: false,

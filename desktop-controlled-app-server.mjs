@@ -187,12 +187,12 @@ export class DesktopControlledAppServer extends EventEmitter {
     return { turn };
   }
 
-  steerTurn() {
-    return Promise.reject(controlledError(
-      'Desktop control channel cannot steer an active turn',
-      'DESKTOP_CONTROL_STEER_UNSUPPORTED',
-      501,
-    ));
+  async steerTurn(threadId, turnId, textOrInput) {
+    this.#assertReady();
+    const prompt = textFromInput(textOrInput);
+    if (!prompt) throw controlledError('Message is empty', 'DESKTOP_CONTROL_EMPTY_MESSAGE', 400);
+    await this.client.sendMessageToThread({ threadId, prompt });
+    return { turnId: turnId || null };
   }
 
   interruptTurn() {

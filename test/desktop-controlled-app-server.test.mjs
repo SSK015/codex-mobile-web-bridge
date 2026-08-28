@@ -81,7 +81,9 @@ const page = await app.listTurns('recent', { limit: 1, sortDirection: 'desc' });
 assert.equal(page.data[0].id, 'new');
 assert.equal(page.nextCursor, 'older');
 
-await assert.rejects(app.steerTurn('recent', 'new', 'more'), (error) => error.code === 'DESKTOP_CONTROL_STEER_UNSUPPORTED' && error.statusCode === 501);
+const steered = await app.steerTurn('recent', 'new', 'more');
+assert.equal(steered.turnId, 'new');
+assert.deepEqual(client.sent.at(-1), { threadId: 'recent', prompt: 'more' });
 await assert.rejects(app.interruptTurn('recent', 'new'), (error) => error.code === 'DESKTOP_CONTROL_INTERRUPT_UNSUPPORTED');
 await assert.rejects(app.startThread(), (error) => error.code === 'DESKTOP_CONTROL_START_THREAD_UNSUPPORTED');
 await assert.rejects(app.restart(), (error) => error.code === 'DESKTOP_CONTROL_RESTART_UNSUPPORTED');
