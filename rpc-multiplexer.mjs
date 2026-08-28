@@ -5,6 +5,10 @@ import { WebSocket, WebSocketServer } from 'ws';
 const DEFAULT_MAX_PAYLOAD = 128 * 1024 * 1024;
 const DEFAULT_MAX_BUFFERED = 64 * 1024 * 1024;
 const DEFAULT_MAX_PENDING = 20_000;
+const DEFAULT_RECONNECT_BASE_DELAY = 250;
+const DEFAULT_RECONNECT_MAX_DELAY = 5_000;
+const UPSTREAM_CONNECT_TIMEOUT = 15_000;
+const UPSTREAM_INITIALIZE_TIMEOUT = 15_000;
 
 function rpcIdKey(id) {
   return `${typeof id}:${String(id)}`;
@@ -83,6 +87,8 @@ export class AppServerRpcMultiplexer extends EventEmitter {
     maxPayloadBytes = DEFAULT_MAX_PAYLOAD,
     maxBufferedBytes = DEFAULT_MAX_BUFFERED,
     maxPendingRequests = DEFAULT_MAX_PENDING,
+    reconnectBaseDelayMs = DEFAULT_RECONNECT_BASE_DELAY,
+    reconnectMaxDelayMs = DEFAULT_RECONNECT_MAX_DELAY,
   }) {
     super();
     this.upstreamUrl = assertLoopbackWebSocketUrl(upstreamUrl, 'upstreamUrl').toString();
@@ -90,6 +96,11 @@ export class AppServerRpcMultiplexer extends EventEmitter {
     this.maxPayloadBytes = maxPayloadBytes;
     this.maxBufferedBytes = maxBufferedBytes;
     this.maxPendingRequests = maxPendingRequests;
+    this.reconnectBaseDelayMs = this.#normalizeReconnectDelay(reconnectBaseDelayMs, DEFAULT_RECONNECT_BASE_DELAY);
+    this.reconnectMaxDelayMs = Math.max(
+      this.reconnectBaseDelayMs,
+      this.#normalizeReconnectDelay(reconnectMaxDelayMs, DEFAULT_RECONNECT_MAX_DELAY),
+    );
     this.httpServer = null;
     this.webSocketServer = null;
     this.upstream = null;
@@ -100,6 +111,13 @@ export class AppServerRpcMultiplexer extends EventEmitter {
     this.desktopServerRequestIds = new Map();
     this.nextUpstreamId = 1;
     this.nextDesktopServerRequestId = -1;
+    this.reconnectTimer = null;
+    this.reconnectAttempt = 0;
+    this.reconnectGeneration = 0;
+    this.reconnecting = false;
+    this.upstreamInitializeTimer = null;
+    this.upstreamInitialization = null;
+    this.initializeRequest = null;
     this.initializeAccepted = false;
     this.initializeResponse = null;
     this.initialized = false;
@@ -124,6 +142,8 @@ export class AppServerRpcMultiplexer extends EventEmitter {
       upstreamConnected: this.upstream?.readyState === WebSocket.OPEN,
       desktopConnected: this.desktop?.socket?.readyState === WebSocket.OPEN,
       initialized: this.initialized,
+      reconnecting: this.reconnecting,
+      reconnectAttempt: this.reconnectAttempt,
       pendingRequests: this.pendingUpstream.size,
       pendingServerRequests: this.serverRequests.size,
       boundUrl: this.boundUrl,
@@ -153,6 +173,8 @@ export class AppServerRpcMultiplexer extends EventEmitter {
     if (!this.readyResolve && !this.readyReject) this.#resetReadyPromise();
     this.started = true;
     this.stopping = false;
+    this.reconnectGeneration += 1;
+    this.reconnectAttempt = 0;
     await this.#startDownstreamServer();
     try {
       await this.#connectUpstream();
@@ -163,9 +185,13 @@ export class AppServerRpcMultiplexer extends EventEmitter {
   }
 
   async stop() {
-    if (!this.started && !this.httpServer && !this.upstream) return;
+    if (!this.started && !this.httpServer && !this.upstream && !this.reconnectTimer) return;
     this.stopping = true;
     this.started = false;
+    this.reconnectGeneration += 1;
+    this.#cancelReconnect();
+    this.#clearUpstreamInitializeTimer();
+    this.upstreamInitialization = null;
     const closeEvent = { code: 1001, reason: 'RPC multiplexer stopping', intentional: true };
     for (const transport of this.internalTransports) transport.fail(new Error(closeEvent.reason), closeEvent);
     this.internalTransports.clear();
@@ -175,8 +201,10 @@ export class AppServerRpcMultiplexer extends EventEmitter {
       this.desktop.socket.close(1001, closeEvent.reason);
     }
     this.desktop = null;
-    if (this.upstream && this.upstream.readyState < WebSocket.CLOSING) {
+    if (this.upstream?.readyState === WebSocket.OPEN) {
       this.upstream.close(1000, closeEvent.reason);
+    } else if (this.upstream?.readyState === WebSocket.CONNECTING) {
+      this.upstream.terminate();
     }
     this.upstream = null;
     if (this.webSocketServer) {
@@ -192,6 +220,9 @@ export class AppServerRpcMultiplexer extends EventEmitter {
     this.initialized = false;
     this.initializeAccepted = false;
     this.initializeResponse = null;
+    this.initializeRequest = null;
+    this.reconnectAttempt = 0;
+    this.reconnecting = false;
     this.stopping = false;
   }
 
@@ -266,6 +297,7 @@ export class AppServerRpcMultiplexer extends EventEmitter {
     const ws = new WebSocket(this.upstreamUrl, { perMessageDeflate: false, maxPayload: this.maxPayloadBytes });
     this.upstream = ws;
     ws.on('message', (data, isBinary) => {
+      if (this.upstream !== ws || this.stopping) return;
       let message;
       try {
         message = JSON.parse(data.toString());
@@ -276,21 +308,20 @@ export class AppServerRpcMultiplexer extends EventEmitter {
       this.#handleUpstreamMessage(message);
     });
     ws.on('error', (error) => {
-      if (this.started && this.listenerCount('error') > 0) this.emit('error', error);
+      if (this.upstream === ws && this.started && this.listenerCount('error') > 0) this.emit('error', error);
     });
     ws.on('close', (code, reason) => {
       if (this.upstream !== ws || this.stopping) return;
-      this.upstream = null;
-      this.#fail(new Error(`Upstream App Server closed (${code}${reason.length ? `: ${reason}` : ''})`), {
+      this.#handleUpstreamExit(new Error(`Upstream App Server closed (${code}${reason.length ? `: ${reason}` : ''})`), {
         code,
         reason: reason.toString(),
-      });
+      }, ws);
     });
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         ws.terminate();
         reject(new Error(`Timed out connecting to ${this.upstreamUrl}`));
-      }, 15_000);
+      }, UPSTREAM_CONNECT_TIMEOUT);
       ws.once('open', () => {
         clearTimeout(timer);
         resolve();
@@ -304,6 +335,104 @@ export class AppServerRpcMultiplexer extends EventEmitter {
         reject(new Error(`Upstream closed before connection (${code})`));
       });
     });
+    if (this.upstream === ws && this.started && !this.stopping) {
+      this.emit('log', 'upstream connected');
+    }
+    return ws;
+  }
+
+  #scheduleReconnect() {
+    if (!this.started || this.stopping || this.reconnectTimer) return;
+    const exponent = Math.min(this.reconnectAttempt, 31);
+    const delay = Math.min(
+      this.reconnectMaxDelayMs,
+      this.reconnectBaseDelayMs * (2 ** exponent),
+    );
+    this.reconnectAttempt = Math.min(this.reconnectAttempt + 1, 31);
+    const generation = this.reconnectGeneration;
+    this.emit('log', `upstream reconnect scheduled in ${delay}ms`);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.#attemptReconnect(generation).catch((error) => {
+        if (!this.started || this.stopping || generation !== this.reconnectGeneration) return;
+        this.#handleUpstreamExit(error, { code: 1011, reason: 'reconnect failed' });
+      });
+    }, delay);
+    this.reconnectTimer.unref?.();
+  }
+
+  #cancelReconnect() {
+    if (!this.reconnectTimer) return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+
+  async #attemptReconnect(generation) {
+    if (!this.started || this.stopping || generation !== this.reconnectGeneration) return;
+    try {
+      const ws = await this.#connectUpstream();
+      if (!this.started || this.stopping || generation !== this.reconnectGeneration || this.upstream !== ws) {
+        if (ws.readyState < WebSocket.CLOSING) ws.close(1000, 'RPC multiplexer stopped');
+        if (this.started && !this.stopping && generation === this.reconnectGeneration) this.#scheduleReconnect();
+        return;
+      }
+      if (this.initializeRequest) {
+        this.#beginUpstreamInitialization(true);
+      } else {
+        this.reconnectAttempt = 0;
+        this.reconnecting = false;
+      }
+    } catch (error) {
+      if (!this.started || this.stopping || generation !== this.reconnectGeneration) return;
+      if (this.upstream?.readyState < WebSocket.CLOSING) {
+        this.upstream.terminate();
+      }
+      this.upstream = null;
+      this.#scheduleReconnect();
+    }
+  }
+
+  #beginUpstreamInitialization(reconnecting = false) {
+    if (!this.initializeRequest || !this.upstream || this.upstream.readyState !== WebSocket.OPEN) return;
+    if (this.upstreamInitialization) return;
+    // The App Server permits initialize only once per socket. A replacement
+    // socket therefore performs a fresh handshake from the first Desktop
+    // initialize parameters; Desktop itself stays on the original socket.
+    const upstreamId = this.#allocateUpstreamId();
+    const pending = {
+      source: reconnecting ? 'reconnect' : 'desktop',
+      desktop: null,
+      transport: null,
+      originalId: null,
+      method: 'initialize',
+      initialize: true,
+      reconnect: reconnecting,
+    };
+    this.pendingUpstream.set(rpcIdKey(upstreamId), pending);
+    this.upstreamInitialization = pending;
+    this.initializeAccepted = false;
+    this.initialized = false;
+    this.reconnecting = reconnecting;
+    try {
+      this.#sendUpstream({
+        method: 'initialize',
+        id: upstreamId,
+        params: this.initializeRequest.params,
+      });
+      this.#clearUpstreamInitializeTimer();
+      this.upstreamInitializeTimer = setTimeout(() => {
+        if (this.upstreamInitialization !== pending) return;
+        this.#handleUpstreamExit(
+          new Error('Timed out initializing the App Server after reconnect'),
+          { code: 1002, reason: 'initialize timeout' },
+        );
+      }, UPSTREAM_INITIALIZE_TIMEOUT);
+      this.upstreamInitializeTimer.unref?.();
+    } catch (error) {
+      this.pendingUpstream.delete(rpcIdKey(upstreamId));
+      this.upstreamInitialization = null;
+      this.#handleUpstreamExit(error, { code: 1011, reason: 'initialize failed' });
+    }
   }
 
   #acceptDesktop(socket) {
@@ -315,7 +444,7 @@ export class AppServerRpcMultiplexer extends EventEmitter {
       socket.close(1013, 'A desktop client is already connected');
       return;
     }
-    const desktop = { socket, protocolReady: false };
+    const desktop = { socket, protocolReady: false, initializeMessage: null };
     this.desktop = desktop;
     this.emit('log', 'desktop connected');
     socket.on('message', (data, isBinary) => {
@@ -332,6 +461,8 @@ export class AppServerRpcMultiplexer extends EventEmitter {
       } catch (error) {
         if (message?.id != null && message?.method) {
           this.#sendDesktop(desktop, { id: message.id, error: { code: -32_000, message: error.message } });
+        } else if (this.reconnecting) {
+          return;
         } else {
           socket.close(1011, 'RPC routing error');
         }
@@ -347,7 +478,11 @@ export class AppServerRpcMultiplexer extends EventEmitter {
         if (pending.source === 'desktop' && pending.desktop === desktop && !pending.initialize) {
           this.pendingUpstream.delete(id);
         }
+        if (pending.reconnect && pending.desktopInitialize?.desktop === desktop) {
+          pending.desktopInitialize = null;
+        }
       }
+      desktop.initializeMessage = null;
       for (const [id, route] of this.desktopServerRequestIds.entries()) {
         if (route.desktop !== desktop) continue;
         const request = this.serverRequests.get(route.upstreamKey);
@@ -391,13 +526,23 @@ export class AppServerRpcMultiplexer extends EventEmitter {
     }
     if (!message.method) return;
     if (message.method === 'initialized') {
-      if (!this.initializeAccepted) throw new Error('initialize has not completed');
+      if (!this.initializeAccepted) {
+        if (this.upstreamInitialization) {
+          return;
+        }
+        throw new Error('initialize has not completed');
+      }
       desktop.protocolReady = true;
       if (!this.initialized) {
-        this.#sendUpstream(message);
-        this.initialized = true;
-        this.#resolveReady();
-        this.emit('log', 'RPC multiplexer initialized');
+        try {
+          this.#sendUpstream(message);
+          this.initialized = true;
+          this.#resolveReady();
+          this.emit('log', 'RPC multiplexer initialized');
+        } catch (error) {
+          this.#handleUpstreamExit(error, { code: 1011, reason: 'initialized failed' });
+          return;
+        }
       }
       this.#deliverPendingServerRequests(desktop);
       return;
@@ -407,12 +552,24 @@ export class AppServerRpcMultiplexer extends EventEmitter {
   }
 
   #handleDesktopInitialize(desktop, message) {
-    if (this.initializeResponse) {
+    if (!this.initializeRequest) {
+      this.initializeRequest = {
+        params: this.#cloneRpcValue(message.params || {}),
+      };
+    }
+    if (this.reconnecting && this.upstream?.readyState === WebSocket.OPEN && !this.upstreamInitialization) {
+      this.#beginUpstreamInitialization(true);
+    }
+    if (this.initializeResponse && this.initialized) {
       this.#sendDesktop(desktop, { ...this.initializeResponse, id: message.id });
-      this.#completeInitialization(desktop);
+      this.#completeDesktopInitialization(desktop);
       return;
     }
     const pendingInitialize = [...this.pendingUpstream.values()].find((pending) => pending.initialize);
+    if (pendingInitialize?.reconnect) {
+      pendingInitialize.desktopInitialize = { desktop, id: message.id };
+      return;
+    }
     if (pendingInitialize && pendingInitialize.desktop !== desktop) {
       pendingInitialize.desktop = desktop;
       pendingInitialize.originalId = message.id;
@@ -423,6 +580,10 @@ export class AppServerRpcMultiplexer extends EventEmitter {
         id: message.id,
         error: { code: -32_000, message: 'initialize is already pending' },
       });
+      return;
+    }
+    if (!this.upstream || this.upstream.readyState !== WebSocket.OPEN) {
+      desktop.initializeMessage = message;
       return;
     }
     this.#forwardRequest('desktop', desktop, message, { initialize: true });
@@ -453,7 +614,11 @@ export class AppServerRpcMultiplexer extends EventEmitter {
       const pending = this.pendingUpstream.get(rpcIdKey(message.id));
       if (!pending) return;
       this.pendingUpstream.delete(rpcIdKey(message.id));
-      const routed = { ...message, id: pending.originalId };
+      if (pending === this.upstreamInitialization) {
+        this.#clearUpstreamInitializeTimer();
+        this.upstreamInitialization = null;
+      }
+      const routed = pending.originalId == null ? { ...message } : { ...message, id: pending.originalId };
       if (pending.initialize) {
         if (!message.error) {
           this.initializeAccepted = true;
@@ -461,12 +626,20 @@ export class AppServerRpcMultiplexer extends EventEmitter {
           delete this.initializeResponse.id;
           this.emit('log', 'upstream initialize accepted');
         } else {
-          this.#rejectReady(new Error(message.error.message || 'App Server initialization failed'));
+          const error = new Error(message.error.message || 'App Server initialization failed');
+          if (pending.reconnect) {
+            this.#handleUpstreamExit(error, { code: 1002, reason: 'initialize rejected' });
+          } else {
+            this.#rejectReady(error);
+          }
         }
       }
       if (pending.source === 'desktop') this.#sendDesktop(pending.desktop, routed);
-      else pending.transport.deliver(routed);
-      if (pending.initialize && !message.error) this.#completeInitialization(pending.desktop);
+      else if (pending.source === 'internal') pending.transport.deliver(routed);
+      if (pending.initialize && !message.error) {
+        if (pending.reconnect) this.#completeUpstreamInitialization(pending);
+        else this.#completeInitialization(pending.desktop);
+      }
       return;
     }
     if (message.id != null && message.method) {
@@ -522,11 +695,52 @@ export class AppServerRpcMultiplexer extends EventEmitter {
       // Recent Desktop builds begin issuing RPC immediately after the successful
       // initialize response and omit the optional initialized notification. Send
       // it upstream on Desktop's behalf so both protocol variants work.
-      this.#sendUpstream({ method: 'initialized', params: {} });
-      this.initialized = true;
-      this.#resolveReady();
-      this.emit('log', 'RPC multiplexer initialized');
+      try {
+        this.#sendUpstream({ method: 'initialized', params: {} });
+        this.initialized = true;
+        this.#resolveReady();
+        this.emit('log', 'RPC multiplexer initialized');
+      } catch (error) {
+        this.#handleUpstreamExit(error, { code: 1011, reason: 'initialized failed' });
+        return;
+      }
     }
+    this.#completeDesktopInitialization(desktop);
+  }
+
+  #completeUpstreamInitialization(pending) {
+    if (this.upstreamInitialization === pending) this.upstreamInitialization = null;
+    if (!this.initialized) {
+      try {
+        this.#sendUpstream({ method: 'initialized', params: {} });
+      } catch (error) {
+        this.#handleUpstreamExit(error, { code: 1011, reason: 'initialized failed' });
+        return;
+      }
+      this.initialized = true;
+      this.reconnectAttempt = 0;
+      this.reconnecting = false;
+      this.#resolveReady();
+      this.emit('log', 'RPC multiplexer initialized after upstream reconnect');
+    }
+    const queuedInitialize = pending.desktopInitialize;
+    if (queuedInitialize?.desktop?.socket?.readyState === WebSocket.OPEN && this.initializeResponse) {
+      this.#sendDesktop(queuedInitialize.desktop, { ...this.initializeResponse, id: queuedInitialize.id });
+      this.#completeDesktopInitialization(queuedInitialize.desktop);
+    }
+    if (this.desktop?.initializeMessage) {
+      const desktop = this.desktop;
+      const message = desktop.initializeMessage;
+      desktop.initializeMessage = null;
+      this.#sendDesktop(desktop, { ...this.initializeResponse, id: message.id });
+      this.#completeDesktopInitialization(desktop);
+    }
+    if (this.desktop) this.#deliverPendingServerRequests(this.desktop);
+  }
+
+  #completeDesktopInitialization(desktop) {
+    if (!desktop) return;
+    desktop.protocolReady = true;
     this.#deliverPendingServerRequests(desktop);
   }
 
@@ -599,14 +813,22 @@ export class AppServerRpcMultiplexer extends EventEmitter {
     ws.send(JSON.stringify(message));
   }
 
-  #rejectPending(error) {
+  #rejectPending(error, { preserveInitialize = false } = {}) {
     for (const pending of this.pendingUpstream.values()) {
+      const preserveDesktopInitialize = pending.initialize && preserveInitialize && pending.source === 'desktop' && pending.desktop;
+      if (preserveDesktopInitialize) {
+        pending.desktop.initializeMessage = {
+          id: pending.originalId,
+          params: this.initializeRequest?.params || {},
+        };
+      }
+      if (preserveDesktopInitialize) continue;
       if (pending.source === 'internal') {
         pending.transport.deliver({
           id: pending.originalId,
           error: { code: -32_000, message: error.message },
         });
-      } else {
+      } else if (pending.source === 'desktop' && pending.originalId != null) {
         this.#sendDesktop(pending.desktop, {
           id: pending.originalId,
           error: { code: -32_000, message: error.message },
@@ -614,26 +836,59 @@ export class AppServerRpcMultiplexer extends EventEmitter {
       }
     }
     this.pendingUpstream.clear();
+    const requestIds = [...this.serverRequests.values()].map((request) => request.id);
+    for (const requestId of requestIds) {
+      for (const transport of this.internalTransports) {
+        transport.deliver({ method: 'serverRequest/resolved', params: { requestId } });
+      }
+    }
     this.serverRequests.clear();
     this.desktopServerRequestIds.clear();
   }
 
   #fail(error, event) {
-    if (!this.started) return;
-    const upstream = this.upstream;
-    this.started = false;
+    this.#handleUpstreamExit(error, event);
+  }
+
+  #handleUpstreamExit(error, event = {}, source = this.upstream) {
+    if (!this.started || this.stopping) return;
+    if (!source && !this.upstream) return;
+    if (source && this.upstream !== source) return;
+    const normalizedError = error instanceof Error ? error : new Error(String(error || 'Upstream App Server disconnected'));
+    const upstream = source || this.upstream;
+    this.upstream = null;
     this.initialized = false;
     this.initializeAccepted = false;
-    this.initializeResponse = null;
-    this.upstream = null;
-    this.#rejectReady(error);
-    this.#rejectPending(error);
-    for (const transport of this.internalTransports) transport.fail(error, event);
-    if (this.desktop?.socket?.readyState === WebSocket.OPEN) {
-      this.desktop.socket.close(1012, 'Upstream App Server disconnected');
-    }
+    this.reconnecting = true;
+    this.#clearUpstreamInitializeTimer();
+    this.upstreamInitialization = null;
+    // A transport that is already waiting for the first initialize must keep
+    // waiting through a transient upstream outage. Only stop() rejects it.
+    if (!this.readyResolve && !this.readyReject) this.#resetReadyPromise();
+    this.#rejectPending(normalizedError, { preserveInitialize: true });
     if (upstream && upstream.readyState < WebSocket.CLOSING) upstream.terminate();
     this.emit('upstreamExit', event);
+    this.#scheduleReconnect();
+  }
+
+  #clearUpstreamInitializeTimer() {
+    if (!this.upstreamInitializeTimer) return;
+    clearTimeout(this.upstreamInitializeTimer);
+    this.upstreamInitializeTimer = null;
+  }
+
+  #normalizeReconnectDelay(value, fallback) {
+    const delay = Number(value);
+    if (!Number.isFinite(delay) || delay < 0) return fallback;
+    return Math.min(Math.floor(delay), 2_147_483_647);
+  }
+
+  #cloneRpcValue(value) {
+    try {
+      return structuredClone(value);
+    } catch {
+      return value;
+    }
   }
 
   #resetReadyPromise() {

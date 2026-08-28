@@ -36,8 +36,8 @@ class MessageProbe extends EventEmitter {
   }
 }
 
-async function listen(server, host = '127.0.0.1') {
-  server.listen(0, host);
+async function listen(server, host = '127.0.0.1', port = 0) {
+  server.listen(port, host);
   await once(server, 'listening');
   return server.address().port;
 }
@@ -69,6 +69,7 @@ const upstreamWss = new WebSocketServer({ noServer: true });
 const upstreamMessages = new EventEmitter();
 let upstreamConnectionCount = 0;
 let upstreamInitializeCount = 0;
+const upstreamInitializeParams = [];
 let upstreamInitializedNotificationCount = 0;
 let upstreamSocket = null;
 
@@ -83,6 +84,7 @@ upstreamWss.on('connection', (socket) => {
     upstreamMessages.emit('message', message);
     if (message.method === 'initialize') {
       upstreamInitializeCount += 1;
+      upstreamInitializeParams.push(message.params);
       socket.send(JSON.stringify({ id: message.id, result: { serverInfo: { name: 'mock-app-server' } } }));
     } else if (message.method === 'initialized') {
       upstreamInitializedNotificationCount += 1;
@@ -98,6 +100,8 @@ const upstreamPort = await listen(upstreamHttp);
 const mux = new AppServerRpcMultiplexer({
   upstreamUrl: `ws://127.0.0.1:${upstreamPort}/`,
   listenUrl: 'ws://127.0.0.1:0/',
+  reconnectBaseDelayMs: 100,
+  reconnectMaxDelayMs: 250,
 });
 await mux.start();
 const preInitializeReady = await fetch(mux.boundUrl.replace(/^ws:/, 'http:') + 'readyz');
@@ -218,21 +222,57 @@ upstreamSocket.send(JSON.stringify({
   params: { threadId: 'desktop-thread', command: 'echo duplicate' },
 }));
 await duplicateRequest;
+const pendingMobileRequest = appServer.request('thread/list', { limit: 1 });
+const pendingMobileRejection = assert.rejects(pendingMobileRequest, /duplicate upstream RPC id|Upstream App Server closed/i);
+await waitForUpstream((message) => message.method === 'thread/list');
 const upstreamExit = once(mux, 'upstreamExit');
-const desktopClose = once(desktop.socket, 'close');
+const upstreamHttpClosed = new Promise((resolve) => upstreamHttp.close(resolve));
 upstreamSocket.send(JSON.stringify({
   method: 'item/commandExecution/requestApproval',
   id: 'duplicate-upstream',
   params: { threadId: 'desktop-thread', command: 'echo duplicate again' },
 }));
 await upstreamExit;
-await desktopClose;
+await upstreamHttpClosed;
+assert.equal(desktop.socket.readyState, WebSocket.OPEN);
 assert.equal(mux.ready, false);
 assert.equal(mux.initialized, false);
 assert.equal(mux.stats.upstreamConnected, false);
 assert.equal(mux.stats.acceptingConnections, false);
 assert.equal(mux.stats.pendingServerRequests, 0);
-assert.equal(appServer.ready, false);
+assert.equal(appServer.ready, true);
+assert.equal(appServer.rpcTransport.active, true);
+await pendingMobileRejection;
+assert.equal(appServer.pending.size, 0);
+assert.equal(appServer.serverRequests.has('duplicate-upstream'), false);
+
+await listen(upstreamHttp, '127.0.0.1', upstreamPort);
+
+await once(mux, 'ready');
+await new Promise((resolve, reject) => {
+  const deadline = Date.now() + 3_000;
+  const poll = () => {
+    if (upstreamInitializedNotificationCount >= 2) return resolve();
+    if (Date.now() >= deadline) return reject(new Error('Timed out waiting for reconnect initialized notification'));
+    setTimeout(poll, 10);
+  };
+  poll();
+});
+assert.equal(mux.ready, true);
+assert.equal(mux.stats.upstreamConnected, true);
+assert.equal(mux.stats.initialized, true);
+assert.equal(mux.stats.pendingRequests, 0);
+assert.equal(mux.stats.pendingServerRequests, 0);
+assert.equal(upstreamConnectionCount, 2);
+assert.equal(upstreamInitializeCount, 2);
+assert.deepEqual(upstreamInitializeParams[1], { clientInfo: { name: 'desktop-test' } });
+assert.equal(upstreamInitializedNotificationCount, 2);
+
+const mobileTurnAfterReconnect = await appServer.startTurn('desktop-thread', 'after upstream reconnect');
+assert.equal(mobileTurnAfterReconnect.turn.id, 'turn-from-mobile');
+desktop.socket.send(JSON.stringify({ method: 'thread/read', id: 101, params: { threadId: 'after-upstream-reconnect' } }));
+const desktopReadAfterReconnect = await desktop.probe.waitFor((message) => message.id === 101);
+assert.equal(desktopReadAfterReconnect.result.thread.id, 'after-upstream-reconnect');
 
 await appServer.stop();
 await mux.stop();

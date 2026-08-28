@@ -276,7 +276,7 @@ async function route(request, response) {
 
   if (request.method === 'GET' && pathname === '/api/status') {
     return json(response, 200, {
-      ready: appServer.ready,
+      ready: appServer.ready && (!rpcMux || rpcMux.ready),
       activeThreadId,
       activeTurnId,
       lastStartedTurnId,
