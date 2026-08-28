@@ -1,4 +1,7 @@
 import { EventEmitter } from 'node:events';
+import path from 'node:path';
+import os from 'node:os';
+import { RolloutHistoryReader } from './rollout-history-reader.mjs';
 
 function controlledError(message, code, statusCode) {
   const error = new Error(message);
@@ -86,6 +89,9 @@ export class DesktopControlledAppServer extends EventEmitter {
     this.serverRequests = new Map();
     this.stopping = false;
     this.pollers = new Map();
+    this.rolloutHistory = new RolloutHistoryReader({
+      root: process.env.CODEX_MOBILE_ROLLOUT_ROOT || path.join(os.homedir(), '.codex', 'sessions'),
+    });
   }
 
   async start() {
@@ -148,6 +154,7 @@ export class DesktopControlledAppServer extends EventEmitter {
     const source = result?.thread ?? result ?? {};
     let turns = includeTurns ? [...(result?.turns ?? source?.turns ?? [])] : [];
     if (includeTurns && result?.page?.order === 'newest_first') turns.reverse();
+    if (includeTurns) turns = await this.rolloutHistory.enrich(threadId, turns);
     return { thread: mapThread({ ...source, id: threadIdOf(source) || String(threadId) }, turns) };
   }
 
@@ -167,8 +174,9 @@ export class DesktopControlledAppServer extends EventEmitter {
       includeOutputs: true,
       maxOutputCharsPerItem: 20_000,
     }));
+    const turns = await this.rolloutHistory.enrich(threadId, [...(result?.turns ?? result?.thread?.turns ?? [])]);
     return {
-      data: [...(result?.turns ?? result?.thread?.turns ?? [])],
+      data: turns,
       nextCursor: result?.page?.nextCursor ?? null,
     };
   }
