@@ -35,6 +35,10 @@
       </label>
       <label for="new-task-title">标题（可选）</label>
       <input id="new-task-title" type="text" maxlength="120" placeholder="由第一条消息自动生成">
+      <div class="model-selectors">
+        <label>模型<select id="new-task-model"><option value="">沿用默认模型</option></select></label>
+        <label>推理强度<select id="new-task-thinking"><option value="">沿用默认强度</option></select></label>
+      </div>
       <label for="new-task-prompt">第一条消息</label>
       <textarea id="new-task-prompt" rows="5" required placeholder="告诉 Codex 要做什么…"></textarea>
       <div id="new-task-error" class="error"></div>
@@ -93,6 +97,10 @@
           <span id="turn-activity-text">Codex 正在思考…</span>
         </div>
         <div id="attachments" class="attachments hidden" aria-live="polite"></div>
+        <div id="turn-options" class="turn-options">
+          <select id="turn-model" aria-label="下一轮模型"><option value="">模型：沿用当前</option></select>
+          <select id="turn-thinking" aria-label="下一轮推理强度"><option value="">强度：沿用当前</option></select>
+        </div>
         <form id="composer" class="composer">
           <button id="attach" type="button" class="secondary attach-button" aria-label="添加图片或文件">＋</button>
           <input id="attachment-input" type="file" multiple hidden>

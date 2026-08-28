@@ -72,8 +72,18 @@ async function waitFor(baseUrl, pathName, predicate, timeoutMs = 10_000) {
   throw new Error(`Timed out waiting for ${pathName}: ${JSON.stringify(last)}`);
 }
 
+const modelSchema = {
+  properties: {
+    model: { description: 'Models: gpt-test (Test.; supported reasoning efforts: low, high).' },
+    thinking: { enum: ['low', 'high'] },
+  },
+};
 const tools = ['list_threads', 'list_projects', 'create_thread', 'read_thread', 'send_message_to_thread']
-  .map((name) => ({ name, namespace: 'codex_app' }));
+  .map((name) => ({
+    name,
+    namespace: 'codex_app',
+    ...(['create_thread', 'send_message_to_thread'].includes(name) ? { inputSchema: modelSchema } : {}),
+  }));
 const calls = [];
 let sentAt = 0;
 let readAfterSendCount = 0;
@@ -110,6 +120,8 @@ function toolResult(request) {
   }
   if (tool === 'create_thread') {
     assert.equal(args.prompt, 'create integration task');
+    assert.equal(args.model, 'gpt-test');
+    assert.equal(args.thinking, 'high');
     assert.deepEqual(args.target, { type: 'project', projectId: 'project-1', environment: { type: 'local' } });
     return { threadId: 'created-desktop-thread', hostId: 'local' };
   }
@@ -194,10 +206,14 @@ try {
   assert.equal(projects.status, 200);
   assert.equal(projects.body.data[0].projectId, 'project-1');
 
+  const modelOptions = await requestJson(`${bridgeBaseUrl}/api/model-options`);
+  assert.deepEqual(modelOptions.body.models, ['gpt-test']);
+  assert.deepEqual(modelOptions.body.modelThinking['gpt-test'], ['low', 'high']);
+
   const created = await requestJson(`${bridgeBaseUrl}/api/threads`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ projectId: 'project-1', prompt: 'create integration task' }),
+    body: JSON.stringify({ projectId: 'project-1', prompt: 'create integration task', model: 'gpt-test', thinking: 'high' }),
   });
   assert.equal(created.status, 201, JSON.stringify(created.body));
   assert.equal(created.body.thread.id, 'created-desktop-thread');

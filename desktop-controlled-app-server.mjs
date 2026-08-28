@@ -66,6 +66,18 @@ function mapThread(summary, turns = undefined) {
   return mapped;
 }
 
+function modelOptionsFromTool(tool) {
+  const properties = tool?.inputSchema?.properties || {};
+  const description = String(properties.model?.description || '');
+  const models = [...description.matchAll(/\b([a-z][a-z0-9.-]+)\s+\(/gi)].map((match) => match[1]);
+  const thinking = Array.isArray(properties.thinking?.enum) ? properties.thinking.enum : [];
+  const modelThinking = {};
+  for (const match of description.matchAll(/\b([a-z][a-z0-9.-]+)\s+\([^)]*supported reasoning efforts:\s*([^)]+)\)/gi)) {
+    modelThinking[match[1]] = match[2].split(',').map((value) => value.trim()).filter(Boolean);
+  }
+  return { models, thinking, modelThinking };
+}
+
 export class DesktopControlledAppServer extends EventEmitter {
   constructor({
     client,
@@ -150,6 +162,18 @@ export class DesktopControlledAppServer extends EventEmitter {
     return { data: Array.isArray(result) ? result : (result?.projects ?? result?.data ?? []) };
   }
 
+  async listModelOptions() {
+    this.#assertReady();
+    const tools = await this.client.listTools();
+    const create = modelOptionsFromTool(tools.get('create_thread'));
+    const send = modelOptionsFromTool(tools.get('send_message_to_thread'));
+    return {
+      models: [...new Set([...create.models, ...send.models])],
+      thinking: [...new Set([...create.thinking, ...send.thinking])],
+      modelThinking: { ...create.modelThinking, ...send.modelThinking },
+    };
+  }
+
   async readThread(threadId, { includeTurns = true } = {}) {
     this.#assertReady();
     const result = unwrap(await this.client.readThread({
@@ -187,13 +211,18 @@ export class DesktopControlledAppServer extends EventEmitter {
     };
   }
 
-  async startTurn(threadId, textOrInput) {
+  async startTurn(threadId, textOrInput, options = {}) {
     this.#assertReady();
     const prompt = textFromInput(textOrInput);
     if (!prompt) throw controlledError('Message is empty', 'DESKTOP_CONTROL_EMPTY_MESSAGE', 400);
     const before = await this.readThread(threadId, { includeTurns: true });
     const known = new Set((before.thread.turns ?? []).map(turnIdOf));
-    await this.client.sendMessageToThread({ threadId, prompt });
+    await this.client.sendMessageToThread({
+      threadId,
+      prompt,
+      ...(options.model ? { model: options.model } : {}),
+      ...(options.thinking ? { thinking: options.thinking } : {}),
+    });
     const turn = await this.#waitForNewTurn(threadId, known);
     const message = { method: 'turn/started', params: { threadId, turn } };
     this.emit('notification', message);
@@ -201,11 +230,16 @@ export class DesktopControlledAppServer extends EventEmitter {
     return { turn };
   }
 
-  async steerTurn(threadId, turnId, textOrInput) {
+  async steerTurn(threadId, turnId, textOrInput, options = {}) {
     this.#assertReady();
     const prompt = textFromInput(textOrInput);
     if (!prompt) throw controlledError('Message is empty', 'DESKTOP_CONTROL_EMPTY_MESSAGE', 400);
-    await this.client.sendMessageToThread({ threadId, prompt });
+    await this.client.sendMessageToThread({
+      threadId,
+      prompt,
+      ...(options.model ? { model: options.model } : {}),
+      ...(options.thinking ? { thinking: options.thinking } : {}),
+    });
     return { turnId: turnId || null };
   }
 
@@ -218,12 +252,14 @@ export class DesktopControlledAppServer extends EventEmitter {
     return { soft: true };
   }
 
-  async startThread({ prompt, target, title } = {}) {
+  async startThread({ prompt, target, title, model, thinking } = {}) {
     this.#assertReady();
     const result = unwrap(await this.client.createThread({
       prompt: String(prompt || '').trim(),
       target,
       ...(title ? { title: String(title).trim() } : {}),
+      ...(model ? { model: String(model).trim() } : {}),
+      ...(thinking ? { thinking: String(thinking).trim() } : {}),
     }));
     const threadId = String(result?.threadId || '');
     if (!threadId) {

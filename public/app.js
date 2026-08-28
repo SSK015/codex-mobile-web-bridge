@@ -11,6 +11,7 @@ const state = {
   canInterrupt: true,
   canCreateThread: true,
   projects: [],
+  modelOptions: { models: [], thinking: [], modelThinking: {} },
   eventSource: null,
   pendingRequests: new Map(),
   toolAlerts: new Map(),
@@ -80,6 +81,10 @@ const elements = {
   newTaskPrompt: $('#new-task-prompt'),
   newTaskError: $('#new-task-error'),
   newTaskSubmit: $('#new-task-submit'),
+  newTaskModel: $('#new-task-model'),
+  newTaskThinking: $('#new-task-thinking'),
+  turnModel: $('#turn-model'),
+  turnThinking: $('#turn-thinking'),
 };
 
 initializeNavigation();
@@ -98,7 +103,7 @@ async function boot() {
       state.activeTurnThreadId = status.activeTurnId ? status.activeThreadId : null;
       state.turnActivityPhase = status.activeTurnId ? 'thinking' : null;
     }
-    await loadThreads();
+    await Promise.all([loadThreads(), loadModelOptions()]);
     connectEvents();
     await loadApprovals();
     if (history.state?.codexMobileView === 'thread' && history.state.threadId) {
@@ -134,6 +139,8 @@ elements.newTaskDialog.addEventListener('click', (event) => {
   if (event.target === elements.newTaskDialog) closeNewTaskDialog();
 });
 elements.newTaskProject.addEventListener('change', syncNewTaskEnvironment);
+elements.newTaskModel.addEventListener('change', () => syncThinkingOptions(elements.newTaskModel, elements.newTaskThinking, '沿用默认强度'));
+elements.turnModel.addEventListener('change', () => syncThinkingOptions(elements.turnModel, elements.turnThinking, '强度：沿用当前'));
 elements.newTaskForm.addEventListener('submit', createNewTask);
 elements.refresh.addEventListener('click', () => loadThreads({ forceRefresh: true }));
 elements.back.addEventListener('click', () => {
@@ -178,6 +185,30 @@ async function openNewTaskDialog() {
   }
 }
 
+async function loadModelOptions() {
+  const result = await api('api/model-options');
+  state.modelOptions = {
+    models: result.models || [],
+    thinking: result.thinking || [],
+    modelThinking: result.modelThinking || {},
+  };
+  fillSelect(elements.newTaskModel, '沿用默认模型', state.modelOptions.models);
+  fillSelect(elements.turnModel, '模型：沿用当前', state.modelOptions.models);
+  syncThinkingOptions(elements.newTaskModel, elements.newTaskThinking, '沿用默认强度');
+  syncThinkingOptions(elements.turnModel, elements.turnThinking, '强度：沿用当前');
+}
+
+function fillSelect(select, defaultLabel, values, selected = select.value) {
+  select.replaceChildren(new Option(defaultLabel, ''));
+  for (const value of values) select.add(new Option(value, value));
+  if ([...select.options].some((option) => option.value === selected)) select.value = selected;
+}
+
+function syncThinkingOptions(modelSelect, thinkingSelect, defaultLabel) {
+  const allowed = state.modelOptions.modelThinking[modelSelect.value] || state.modelOptions.thinking;
+  fillSelect(thinkingSelect, defaultLabel, allowed);
+}
+
 function closeNewTaskDialog() {
   elements.newTaskDialog.classList.add('hidden');
 }
@@ -202,6 +233,8 @@ async function createNewTask(event) {
         useSavedProjectDirectly: elements.newTaskDirect.checked,
         title: elements.newTaskTitle.value.trim() || null,
         prompt: elements.newTaskPrompt.value.trim(),
+        model: elements.newTaskModel.value || null,
+        thinking: elements.newTaskThinking.value || null,
       },
     });
     closeNewTaskDialog();
@@ -269,7 +302,12 @@ elements.composer.addEventListener('submit', async (event) => {
   try {
     const result = await api(`api/threads/${encodeURIComponent(submittedThreadId)}/messages`, {
       method: 'POST',
-      body: { text, attachments: readyAttachments.map((attachment) => ({ id: attachment.id })) },
+      body: {
+        text,
+        attachments: readyAttachments.map((attachment) => ({ id: attachment.id })),
+        model: elements.turnModel.value || null,
+        thinking: elements.turnThinking.value || null,
+      },
     });
     clearAttachments({ removeRemote: false });
     if (lifecycleGeneration === state.turnLifecycleGeneration && state.activeThread?.id === submittedThreadId) {

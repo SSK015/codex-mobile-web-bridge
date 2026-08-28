@@ -383,6 +383,11 @@ async function route(request, response) {
     return json(response, 200, { data: projects });
   }
 
+  if (request.method === 'GET' && pathname === '/api/model-options') {
+    if (typeof appServer.listModelOptions !== 'function') return json(response, 200, { models: [], thinking: [] });
+    return json(response, 200, await appServer.listModelOptions());
+  }
+
   if (request.method === 'POST' && pathname === '/api/threads') {
     if (activeTurnId && !DESKTOP_CONTROL_MODE) {
       const error = new Error('当前回复尚未结束');
@@ -416,7 +421,8 @@ async function route(request, response) {
             : { type: 'local' },
         };
       }
-      result = await appServer.startThread({ prompt, target, title: body.title || null });
+      const selection = normalizeModelSelection(body);
+      result = await appServer.startThread({ prompt, target, title: body.title || null, ...selection });
       if (result.queued) {
         scheduleThreadListRefresh({ force: true });
         return json(response, 202, {
@@ -672,6 +678,7 @@ async function route(request, response) {
       await ensureWritableThread(threadId);
       const body = await readJson(request);
       const text = String(body.text || '').trim();
+      const selection = normalizeModelSelection(body);
       const attachments = await resolveUploadAttachments(threadId, body.attachments);
       if (!text && attachments.length === 0) {
         const error = new Error('消息或附件不能为空');
@@ -682,7 +689,7 @@ async function route(request, response) {
       if (activeTurnId && activeTurnThreadId === threadId) {
         let result;
         try {
-          result = await appServer.steerTurn(threadId, activeTurnId, input);
+          result = await appServer.steerTurn(threadId, activeTurnId, input, selection);
         } catch (error) {
           throw mapMessageWriteError(error);
         }
@@ -691,7 +698,7 @@ async function route(request, response) {
       }
       let result;
       try {
-        result = await appServer.startTurn(threadId, input);
+        result = await appServer.startTurn(threadId, input, selection);
       } catch (error) {
         throw mapMessageWriteError(error);
       }
@@ -877,6 +884,26 @@ async function enrichProjectForCreate(project) {
     result.worktreeReady = false;
   }
   return result;
+}
+
+function normalizeModelSelection(body) {
+  const model = String(body?.model || '').trim();
+  const thinking = String(body?.thinking || '').trim();
+  if (model && (model.length > 100 || !/^[a-zA-Z0-9._-]+$/.test(model))) {
+    const error = new Error('无效的模型名称');
+    error.statusCode = 400;
+    throw error;
+  }
+  const allowedThinking = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+  if (thinking && !allowedThinking.has(thinking)) {
+    const error = new Error('无效的推理强度');
+    error.statusCode = 400;
+    throw error;
+  }
+  return {
+    ...(model ? { model } : {}),
+    ...(thinking ? { thinking } : {}),
+  };
 }
 
 function execFileResult(command, args) {

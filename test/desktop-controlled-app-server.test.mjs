@@ -22,6 +22,18 @@ class FakeDesktopClient {
   async listProjects() {
     return wrapped({ projects: [{ projectId: 'p1', name: 'Project one', isGitRepository: true }] });
   }
+  async listTools() {
+    const schema = {
+      properties: {
+        model: { description: 'Models: gpt-test (Test.; supported reasoning efforts: low, high).' },
+        thinking: { enum: ['low', 'high'] },
+      },
+    };
+    return new Map([
+      ['create_thread', { inputSchema: schema }],
+      ['send_message_to_thread', { inputSchema: schema }],
+    ]);
+  }
   async createThread(args) {
     this.created = args;
     return wrapped({ threadId: 'created-thread', hostId: 'local' });
@@ -64,12 +76,19 @@ assert.equal(read.thread.turns[0].id, 'old');
 
 const projects = await app.listProjects();
 assert.equal(projects.data[0].projectId, 'p1');
+const modelOptions = await app.listModelOptions();
+assert.deepEqual(modelOptions.models, ['gpt-test']);
+assert.deepEqual(modelOptions.modelThinking['gpt-test'], ['low', 'high']);
 const created = await app.startThread({
   prompt: 'new task',
   target: { type: 'project', projectId: 'p1', environment: { type: 'worktree' } },
+  model: 'gpt-test',
+  thinking: 'high',
 });
 assert.equal(created.thread.id, 'created-thread');
 assert.equal(client.created.target.environment.type, 'worktree');
+assert.equal(client.created.model, 'gpt-test');
+assert.equal(client.created.thinking, 'high');
 
 const notifications = [];
 app.on('notification', (message) => notifications.push(message));
