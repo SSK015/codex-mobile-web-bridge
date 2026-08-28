@@ -163,7 +163,10 @@ async function openNewTaskDialog() {
     for (const project of state.projects) {
       const projectId = String(project.projectId || project.id || '');
       if (!projectId) continue;
-      const label = String(project.label || project.name || project.title || project.path || projectId);
+      const baseLabel = String(project.label || project.name || project.title || project.path || projectId);
+      const label = project.isGitRepository && !project.worktreeReady
+        ? `${baseLabel}（直接使用目录）`
+        : baseLabel;
       elements.newTaskProject.add(new Option(label, projectId));
     }
     syncNewTaskEnvironment();
@@ -181,9 +184,9 @@ function closeNewTaskDialog() {
 
 function syncNewTaskEnvironment() {
   const selected = state.projects.find((project) => String(project.projectId || project.id) === elements.newTaskProject.value);
-  const isGitRepository = Boolean(selected?.isGitRepository);
-  elements.newTaskEnvironmentRow.classList.toggle('hidden', !isGitRepository);
-  if (!isGitRepository) elements.newTaskDirect.checked = false;
+  const worktreeReady = Boolean(selected?.worktreeReady);
+  elements.newTaskEnvironmentRow.classList.toggle('hidden', !worktreeReady);
+  if (!worktreeReady) elements.newTaskDirect.checked = false;
 }
 
 async function createNewTask(event) {

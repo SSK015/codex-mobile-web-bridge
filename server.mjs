@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { CodexAppServer, isActiveWriterError, resumeThreadWithReadFallback } from './app-server-client.mjs';
 import { DesktopAppToolsClient } from './desktop-app-tools-client.mjs';
@@ -378,7 +379,8 @@ async function route(request, response) {
   if (request.method === 'GET' && pathname === '/api/projects') {
     if (typeof appServer.listProjects !== 'function') return json(response, 200, { data: [] });
     const result = await appServer.listProjects();
-    return json(response, 200, { data: result.data || [] });
+    const projects = await Promise.all((result.data || []).map(enrichProjectForCreate));
+    return json(response, 200, { data: projects });
   }
 
   if (request.method === 'POST' && pathname === '/api/threads') {
@@ -405,11 +407,11 @@ async function route(request, response) {
           error.statusCode = 400;
           throw error;
         }
-        const isGitRepository = Boolean(project.isGitRepository);
+        const checkedProject = await enrichProjectForCreate(project);
         target = {
           type: 'project',
           projectId: String(project.projectId || project.id),
-          environment: isGitRepository && !body.useSavedProjectDirectly
+          environment: checkedProject.worktreeReady && !body.useSavedProjectDirectly
             ? { type: 'worktree' }
             : { type: 'local' },
         };
@@ -862,6 +864,28 @@ async function route(request, response) {
 
   if (request.method === 'GET') return serveStatic(pathname, response);
   json(response, 404, { error: 'Not found' });
+}
+
+async function enrichProjectForCreate(project) {
+  const result = { ...project, worktreeReady: false };
+  if (!project?.isGitRepository || typeof project.path !== 'string' || !path.isAbsolute(project.path)) return result;
+  try {
+    const head = await execFileResult('git', ['-C', project.path, 'rev-parse', '--verify', 'HEAD']);
+    const main = await execFileResult('git', ['-C', project.path, 'rev-parse', '--verify', 'main']);
+    result.worktreeReady = Boolean(head.trim() && main.trim());
+  } catch {
+    result.worktreeReady = false;
+  }
+  return result;
+}
+
+function execFileResult(command, args) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { windowsHide: true, timeout: 3_000, encoding: 'utf8' }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(stdout);
+    });
+  });
 }
 
 async function receiveUpload(request, threadId) {
