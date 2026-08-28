@@ -235,10 +235,22 @@ export class DesktopControlledAppServer extends EventEmitter {
 
   async #pollCompletion(threadId, turnId) {
     const deadline = Date.now() + this.completionTimeoutMs;
+    const itemFingerprints = new Map();
     try {
       while (!this.stopping && Date.now() < deadline) {
         const result = await this.readThread(threadId, { includeTurns: true });
         const turn = (result.thread.turns ?? []).find((candidate) => turnIdOf(candidate) === turnId);
+        for (const item of turn?.items ?? []) {
+          const itemId = String(item?.id ?? '');
+          if (!itemId) continue;
+          const fingerprint = JSON.stringify(item);
+          if (itemFingerprints.get(itemId) === fingerprint) continue;
+          itemFingerprints.set(itemId, fingerprint);
+          this.emit('notification', {
+            method: isComplete(item) ? 'item/completed' : 'item/started',
+            params: { threadId, turnId, item },
+          });
+        }
         if (turn && isComplete(turn)) {
           this.emit('notification', { method: 'turn/completed', params: { threadId, turn } });
           return;
