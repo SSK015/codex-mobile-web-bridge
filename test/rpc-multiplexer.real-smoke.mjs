@@ -56,7 +56,6 @@ await desktop.request('initialize', {
   clientInfo: { name: 'codex-mobile-rpc-mux-smoke', title: 'RPC Mux Smoke Test', version: '1.0.0' },
   capabilities: { experimentalApi: true },
 });
-desktop.notify('initialized');
 await mobileReady;
 
 const started = await desktop.request('thread/start', {

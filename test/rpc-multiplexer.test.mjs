@@ -53,6 +53,7 @@ const upstreamWss = new WebSocketServer({ noServer: true });
 const upstreamMessages = new EventEmitter();
 let upstreamConnectionCount = 0;
 let upstreamInitializeCount = 0;
+let upstreamInitializedNotificationCount = 0;
 let upstreamSocket = null;
 
 upstreamHttp.on('upgrade', (request, socket, head) => {
@@ -67,6 +68,8 @@ upstreamWss.on('connection', (socket) => {
     if (message.method === 'initialize') {
       upstreamInitializeCount += 1;
       socket.send(JSON.stringify({ id: message.id, result: { serverInfo: { name: 'mock-app-server' } } }));
+    } else if (message.method === 'initialized') {
+      upstreamInitializedNotificationCount += 1;
     } else if (message.method === 'thread/read') {
       socket.send(JSON.stringify({ id: message.id, result: { thread: { id: message.params.threadId, turns: [] } } }));
     } else if (message.method === 'turn/start') {
@@ -96,8 +99,8 @@ let desktop = await connect(mux.boundUrl);
 desktop.socket.send(Buffer.from(JSON.stringify({ method: 'initialize', id: 'desktop-init', params: { clientInfo: { name: 'desktop-test' } } })));
 const initializeResponse = await desktop.probe.waitFor((message) => message.id === 'desktop-init');
 assert.equal(initializeResponse.result.serverInfo.name, 'mock-app-server');
-desktop.socket.send(JSON.stringify({ method: 'initialized', params: {} }));
 await mobileStart;
+desktop.socket.send(JSON.stringify({ method: 'initialized', params: {} }));
 assert.equal(appServer.ready, true);
 assert.equal(mux.ready, true);
 const postInitializeReady = await fetch(mux.boundUrl.replace(/^ws:/, 'http:') + 'readyz');
@@ -105,6 +108,7 @@ assert.equal(postInitializeReady.status, 200);
 assert.equal((await postInitializeReady.json()).ready, true);
 assert.equal(upstreamConnectionCount, 1);
 assert.equal(upstreamInitializeCount, 1);
+assert.equal(upstreamInitializedNotificationCount, 1);
 
 desktop.socket.send(JSON.stringify({ method: 'thread/read', id: 7, params: { threadId: 'desktop-thread' } }));
 const desktopRead = await desktop.probe.waitFor((message) => message.id === 7);

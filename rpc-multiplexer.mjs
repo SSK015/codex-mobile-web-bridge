@@ -454,6 +454,7 @@ export class AppServerRpcMultiplexer extends EventEmitter {
       }
       if (pending.source === 'desktop') this.#sendDesktop(pending.desktop, routed);
       else pending.transport.deliver(routed);
+      if (pending.initialize && !message.error) this.#completeInitialization(pending.desktop);
       return;
     }
     if (message.id != null && message.method) {
@@ -473,6 +474,19 @@ export class AppServerRpcMultiplexer extends EventEmitter {
 
   #deliverPendingServerRequests(desktop) {
     for (const upstreamKey of this.serverRequests.keys()) this.#deliverServerRequestToDesktop(desktop, upstreamKey);
+  }
+
+  #completeInitialization(desktop) {
+    desktop.protocolReady = true;
+    if (this.initialized) return;
+    // Recent Desktop builds begin issuing RPC immediately after the successful
+    // initialize response and omit the optional initialized notification. Send
+    // it upstream on Desktop's behalf so both protocol variants work.
+    this.#sendUpstream({ method: 'initialized', params: {} });
+    this.initialized = true;
+    this.#resolveReady();
+    this.emit('log', 'RPC multiplexer initialized');
+    this.#deliverPendingServerRequests(desktop);
   }
 
   #deliverServerRequestToDesktop(desktop, upstreamKey) {
