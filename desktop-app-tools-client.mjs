@@ -132,6 +132,14 @@ export class DesktopAppToolsClient {
     return this.#callTool('list_threads', args, contextThreadId);
   }
 
+  listProjects(args = {}, contextThreadId = this.contextThreadId) {
+    return this.#callTool('list_projects', args, contextThreadId);
+  }
+
+  createThread(args, contextThreadId = this.contextThreadId) {
+    return this.#callTool('create_thread', args, contextThreadId);
+  }
+
   readThread(args) {
     return this.#callTool('read_thread', args, args?.threadId);
   }

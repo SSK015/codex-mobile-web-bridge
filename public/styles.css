@@ -37,7 +37,7 @@ header > div:first-of-type { display: flex; align-items: baseline; gap: 10px; mi
 
 main { height: calc(100dvh - 58px); display: grid; grid-template-columns: minmax(260px, 340px) 1fr; }
 aside { min-width: 0; border-right: 1px solid var(--border); background: var(--panel); overflow: hidden; display: flex; flex-direction: column; }
-.search-wrap { padding: 12px; border-bottom: 1px solid var(--border); }
+.search-wrap { padding: 12px; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: 1fr auto; gap: 8px; }
 .thread-list-status { padding: 7px 12px; border-bottom: 1px solid var(--border); color: #8390a0; font-size: 11px; }
 input, textarea, select { width: 100%; border: 1px solid var(--border); border-radius: 12px; background: #0d1014; color: var(--text); padding: 11px 12px; outline: none; }
 input:focus, textarea:focus, select:focus { border-color: #4b8f80; box-shadow: 0 0 0 3px rgba(107, 231, 200, .08); }
@@ -219,6 +219,15 @@ button.danger { color: #210407; background: var(--danger); font-weight: 700; }
 .login-card h1 { text-align: center; margin-bottom: 4px; }
 .login-card p { text-align: center; color: var(--muted); }
 .login-card button { width: 100%; margin-top: 10px; }
+.new-task-card { display: grid; gap: 10px; max-height: calc(100vh - 36px); overflow: auto; }
+.new-task-card label { color: var(--muted); font-size: 13px; }
+.new-task-card select, .new-task-card textarea, .new-task-card input[type="text"] { width: 100%; }
+.new-task-card textarea { resize: vertical; min-height: 110px; }
+.new-task-card > .primary { width: 100%; margin-top: 4px; }
+.dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.dialog-heading h2 { margin: 0; }
+.checkbox-row { display: flex; align-items: flex-start; gap: 8px; }
+.checkbox-row input { margin-top: 2px; }
 .error { min-height: 22px; margin-top: 8px; color: var(--danger); }
 .hidden { display: none !important; }
 .mobile-only { display: none; }

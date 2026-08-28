@@ -19,6 +19,13 @@ class FakeDesktopClient {
       nextCursor: 'next',
     });
   }
+  async listProjects() {
+    return wrapped({ projects: [{ projectId: 'p1', name: 'Project one', isGitRepository: true }] });
+  }
+  async createThread(args) {
+    this.created = args;
+    return wrapped({ threadId: 'created-thread', hostId: 'local' });
+  }
   async readThread({ threadId }) {
     this.reads++;
     if (this.sent.length && !this.turns.some((turn) => turn.id === 'new')) {
@@ -55,6 +62,15 @@ assert.equal(read.thread.id, 'recent');
 assert.equal(read.thread.name, 'Task');
 assert.equal(read.thread.turns[0].id, 'old');
 
+const projects = await app.listProjects();
+assert.equal(projects.data[0].projectId, 'p1');
+const created = await app.startThread({
+  prompt: 'new task',
+  target: { type: 'project', projectId: 'p1', environment: { type: 'worktree' } },
+});
+assert.equal(created.thread.id, 'created-thread');
+assert.equal(client.created.target.environment.type, 'worktree');
+
 const notifications = [];
 app.on('notification', (message) => notifications.push(message));
 const result = await app.startTurn('recent', [
@@ -87,7 +103,6 @@ assert.deepEqual(client.sent.at(-1), { threadId: 'recent', prompt: 'more' });
 const interrupted = await app.interruptTurn('recent', 'new');
 assert.equal(interrupted.soft, true);
 assert.match(client.sent.at(-1).prompt, /暂时停止当前任务/);
-await assert.rejects(app.startThread(), (error) => error.code === 'DESKTOP_CONTROL_START_THREAD_UNSUPPORTED');
 await assert.rejects(app.restart(), (error) => error.code === 'DESKTOP_CONTROL_RESTART_UNSUPPORTED');
 
 await app.stop();

@@ -144,6 +144,12 @@ export class DesktopControlledAppServer extends EventEmitter {
     return { data, nextCursor: null };
   }
 
+  async listProjects() {
+    this.#assertReady();
+    const result = unwrap(await this.client.listProjects());
+    return { data: Array.isArray(result) ? result : (result?.projects ?? result?.data ?? []) };
+  }
+
   async readThread(threadId, { includeTurns = true } = {}) {
     this.#assertReady();
     const result = unwrap(await this.client.readThread({
@@ -212,12 +218,23 @@ export class DesktopControlledAppServer extends EventEmitter {
     return { soft: true };
   }
 
-  startThread() {
-    return Promise.reject(controlledError(
-      'Desktop control channel cannot create a task',
-      'DESKTOP_CONTROL_START_THREAD_UNSUPPORTED',
-      501,
-    ));
+  async startThread({ prompt, target, title } = {}) {
+    this.#assertReady();
+    const result = unwrap(await this.client.createThread({
+      prompt: String(prompt || '').trim(),
+      target,
+      ...(title ? { title: String(title).trim() } : {}),
+    }));
+    const threadId = String(result?.threadId || '');
+    if (!threadId) {
+      return {
+        queued: true,
+        clientThreadId: String(result?.clientThreadId || ''),
+        hostId: result?.hostId || null,
+      };
+    }
+    const opened = await this.readThread(threadId, { includeTurns: true });
+    return { ...result, thread: opened.thread };
   }
 
   respondToServerRequest() {

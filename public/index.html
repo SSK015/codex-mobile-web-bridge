@@ -19,6 +19,29 @@
     </form>
   </div>
 
+  <div id="new-task-dialog" class="overlay hidden">
+    <form id="new-task-form" class="card new-task-card">
+      <div class="dialog-heading">
+        <h2>新建 Codex task</h2>
+        <button id="new-task-close" type="button" class="icon-button" aria-label="关闭">×</button>
+      </div>
+      <label for="new-task-project">项目</label>
+      <select id="new-task-project">
+        <option value="">无项目</option>
+      </select>
+      <label id="new-task-environment-row" class="checkbox-row hidden">
+        <input id="new-task-direct" type="checkbox">
+        <span>直接使用保存的项目目录（不创建 worktree）</span>
+      </label>
+      <label for="new-task-title">标题（可选）</label>
+      <input id="new-task-title" type="text" maxlength="120" placeholder="由第一条消息自动生成">
+      <label for="new-task-prompt">第一条消息</label>
+      <textarea id="new-task-prompt" rows="5" required placeholder="告诉 Codex 要做什么…"></textarea>
+      <div id="new-task-error" class="error"></div>
+      <button id="new-task-submit" type="submit" class="primary">创建</button>
+    </form>
+  </div>
+
   <header>
     <button id="back" class="icon-button mobile-only" aria-label="返回">←</button>
     <div>
@@ -35,6 +58,7 @@
     <aside id="sidebar">
       <div class="search-wrap">
         <input id="search" type="search" placeholder="搜索 tasks">
+        <button id="new-task" type="button" class="primary">新建</button>
       </div>
       <div id="thread-list-status" class="thread-list-status hidden"></div>
       <div id="thread-list" class="thread-list"></div>

@@ -72,7 +72,7 @@ async function waitFor(baseUrl, pathName, predicate, timeoutMs = 10_000) {
   throw new Error(`Timed out waiting for ${pathName}: ${JSON.stringify(last)}`);
 }
 
-const tools = ['list_threads', 'read_thread', 'send_message_to_thread']
+const tools = ['list_threads', 'list_projects', 'create_thread', 'read_thread', 'send_message_to_thread']
   .map((name) => ({ name, namespace: 'codex_app' }));
 const calls = [];
 let sentAt = 0;
@@ -105,12 +105,19 @@ function toolResult(request) {
       threads: [{ id: threadId, title: 'Desktop controlled task', cwd: root, status: 'idle', updatedAt: 1 }],
     };
   }
+  if (tool === 'list_projects') {
+    return { projects: [{ projectId: 'project-1', name: 'Project one', isGitRepository: false }] };
+  }
+  if (tool === 'create_thread') {
+    assert.equal(args.prompt, 'create integration task');
+    assert.deepEqual(args.target, { type: 'project', projectId: 'project-1', environment: { type: 'local' } });
+    return { threadId: 'created-desktop-thread', hostId: 'local' };
+  }
   if (tool === 'read_thread') {
-    assert.equal(contextThreadId, threadId);
-    assert.equal(args.threadId, threadId);
+    assert.equal(contextThreadId, args.threadId);
     return {
-      thread: { id: threadId, title: 'Desktop controlled task', cwd: root, status: sentAt ? 'active' : 'idle' },
-      turns: currentTurns(),
+      thread: { id: args.threadId, title: 'Desktop controlled task', cwd: root, status: sentAt ? 'active' : 'idle' },
+      turns: args.threadId === threadId ? currentTurns() : [],
     };
   }
   if (tool === 'send_message_to_thread') {
@@ -182,6 +189,18 @@ try {
   const listed = await requestJson(`${bridgeBaseUrl}/api/threads?limit=20`);
   assert.equal(listed.status, 200);
   assert.equal(listed.body.data[0].id, threadId);
+
+  const projects = await requestJson(`${bridgeBaseUrl}/api/projects`);
+  assert.equal(projects.status, 200);
+  assert.equal(projects.body.data[0].projectId, 'project-1');
+
+  const created = await requestJson(`${bridgeBaseUrl}/api/threads`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ projectId: 'project-1', prompt: 'create integration task' }),
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.thread.id, 'created-desktop-thread');
 
   const resumed = await requestJson(`${bridgeBaseUrl}/api/threads/${threadId}/resume`, {
     method: 'POST',

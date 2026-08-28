@@ -9,6 +9,8 @@ const state = {
   turnLifecycleGeneration: 0,
   canSteer: true,
   canInterrupt: true,
+  canCreateThread: true,
+  projects: [],
   eventSource: null,
   pendingRequests: new Map(),
   toolAlerts: new Map(),
@@ -67,6 +69,17 @@ const elements = {
   requestDrawer: $('#request-drawer'),
   requestDrawerClose: $('#request-drawer-close'),
   requestPanelList: $('#request-panel-list'),
+  newTask: $('#new-task'),
+  newTaskDialog: $('#new-task-dialog'),
+  newTaskForm: $('#new-task-form'),
+  newTaskClose: $('#new-task-close'),
+  newTaskProject: $('#new-task-project'),
+  newTaskDirect: $('#new-task-direct'),
+  newTaskEnvironmentRow: $('#new-task-environment-row'),
+  newTaskTitle: $('#new-task-title'),
+  newTaskPrompt: $('#new-task-prompt'),
+  newTaskError: $('#new-task-error'),
+  newTaskSubmit: $('#new-task-submit'),
 };
 
 initializeNavigation();
@@ -78,6 +91,8 @@ async function boot() {
     setOnline(status.ready);
     state.canSteer = status.capabilities?.steerTurn !== false;
     state.canInterrupt = status.capabilities?.interruptTurn !== false;
+    state.canCreateThread = status.capabilities?.createThread !== false;
+    elements.newTask.classList.toggle('hidden', !state.canCreateThread);
     if (status.activeThreadId) {
       state.activeTurnId = status.activeTurnId;
       state.activeTurnThreadId = status.activeTurnId ? status.activeThreadId : null;
@@ -113,6 +128,13 @@ elements.loginForm.addEventListener('submit', async (event) => {
 });
 
 elements.search.addEventListener('input', debounce(loadThreads, 250));
+elements.newTask.addEventListener('click', openNewTaskDialog);
+elements.newTaskClose.addEventListener('click', closeNewTaskDialog);
+elements.newTaskDialog.addEventListener('click', (event) => {
+  if (event.target === elements.newTaskDialog) closeNewTaskDialog();
+});
+elements.newTaskProject.addEventListener('change', syncNewTaskEnvironment);
+elements.newTaskForm.addEventListener('submit', createNewTask);
 elements.refresh.addEventListener('click', () => loadThreads({ forceRefresh: true }));
 elements.back.addEventListener('click', () => {
   if (history.state?.codexMobileView === 'thread') history.back();
@@ -129,6 +151,73 @@ elements.imageViewerClose.addEventListener('click', closeImageViewer);
 elements.imageViewer.addEventListener('click', (event) => {
   if (event.target === elements.imageViewer) closeImageViewer();
 });
+
+async function openNewTaskDialog() {
+  elements.newTaskError.textContent = '';
+  elements.newTaskDialog.classList.remove('hidden');
+  elements.newTaskSubmit.disabled = true;
+  try {
+    const result = await api('api/projects');
+    state.projects = result.data || [];
+    elements.newTaskProject.replaceChildren(new Option('无项目', ''));
+    for (const project of state.projects) {
+      const projectId = String(project.projectId || project.id || '');
+      if (!projectId) continue;
+      const label = String(project.label || project.name || project.title || project.path || projectId);
+      elements.newTaskProject.add(new Option(label, projectId));
+    }
+    syncNewTaskEnvironment();
+    elements.newTaskPrompt.focus();
+  } catch (error) {
+    elements.newTaskError.textContent = error.message;
+  } finally {
+    elements.newTaskSubmit.disabled = false;
+  }
+}
+
+function closeNewTaskDialog() {
+  elements.newTaskDialog.classList.add('hidden');
+}
+
+function syncNewTaskEnvironment() {
+  const selected = state.projects.find((project) => String(project.projectId || project.id) === elements.newTaskProject.value);
+  const isGitRepository = Boolean(selected?.isGitRepository);
+  elements.newTaskEnvironmentRow.classList.toggle('hidden', !isGitRepository);
+  if (!isGitRepository) elements.newTaskDirect.checked = false;
+}
+
+async function createNewTask(event) {
+  event.preventDefault();
+  elements.newTaskError.textContent = '';
+  elements.newTaskSubmit.disabled = true;
+  elements.newTaskSubmit.textContent = '正在创建…';
+  try {
+    const result = await api('api/threads', {
+      method: 'POST',
+      body: {
+        projectId: elements.newTaskProject.value || null,
+        useSavedProjectDirectly: elements.newTaskDirect.checked,
+        title: elements.newTaskTitle.value.trim() || null,
+        prompt: elements.newTaskPrompt.value.trim(),
+      },
+    });
+    closeNewTaskDialog();
+    elements.newTaskForm.reset();
+    state.projects = [];
+    await loadThreads({ forceRefresh: true });
+    if (result.thread?.id) await openThread(result.thread.id);
+    else {
+      elements.threadListStatus.textContent = 'worktree 正在创建；完成后会出现在列表中。';
+      elements.threadListStatus.classList.remove('hidden');
+      setTimeout(() => loadThreads({ forceRefresh: true }), 2500);
+    }
+  } catch (error) {
+    elements.newTaskError.textContent = error.message;
+  } finally {
+    elements.newTaskSubmit.disabled = false;
+    elements.newTaskSubmit.textContent = '创建';
+  }
+}
 elements.imageViewerImage.addEventListener('click', () => elements.imageViewerImage.classList.toggle('zoomed'));
 elements.attach.addEventListener('click', () => elements.attachmentInput.click());
 elements.attachmentInput.addEventListener('change', () => {

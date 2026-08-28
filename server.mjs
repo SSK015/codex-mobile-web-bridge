@@ -302,7 +302,7 @@ async function route(request, response) {
       authEnabled: Boolean(secret),
       appServerTransport: DESKTOP_CONTROL_MODE ? 'desktop-control' : (rpcMux ? 'rpc-mux' : (APP_SERVER_URL ? 'websocket' : 'stdio')),
       capabilities: {
-        createThread: !DESKTOP_CONTROL_MODE,
+        createThread: true,
         steerTurn: true,
         interruptTurn: true,
         interruptMode: DESKTOP_CONTROL_MODE ? 'soft-message' : 'hard',
@@ -375,17 +375,59 @@ async function route(request, response) {
     });
   }
 
+  if (request.method === 'GET' && pathname === '/api/projects') {
+    if (typeof appServer.listProjects !== 'function') return json(response, 200, { data: [] });
+    const result = await appServer.listProjects();
+    return json(response, 200, { data: result.data || [] });
+  }
+
   if (request.method === 'POST' && pathname === '/api/threads') {
-    if (activeTurnId) {
+    if (activeTurnId && !DESKTOP_CONTROL_MODE) {
       const error = new Error('当前回复尚未结束');
       error.statusCode = 409;
       throw error;
     }
     const body = await readJson(request);
-    const result = await appServer.startThread({
-      cwd: process.cwd(),
-      ephemeral: Boolean(body.ephemeral),
-    });
+    let result;
+    if (DESKTOP_CONTROL_MODE) {
+      const prompt = String(body.prompt || '').trim();
+      if (!prompt) {
+        const error = new Error('新 task 需要第一条消息');
+        error.statusCode = 400;
+        throw error;
+      }
+      let target = { type: 'projectless' };
+      if (body.projectId) {
+        const projects = await appServer.listProjects();
+        const project = (projects.data || []).find((candidate) => String(candidate?.projectId || candidate?.id) === String(body.projectId));
+        if (!project) {
+          const error = new Error('选择的项目不存在或当前不可用');
+          error.statusCode = 400;
+          throw error;
+        }
+        const isGitRepository = Boolean(project.isGitRepository);
+        target = {
+          type: 'project',
+          projectId: String(project.projectId || project.id),
+          environment: isGitRepository && !body.useSavedProjectDirectly
+            ? { type: 'worktree' }
+            : { type: 'local' },
+        };
+      }
+      result = await appServer.startThread({ prompt, target, title: body.title || null });
+      if (result.queued) {
+        scheduleThreadListRefresh({ force: true });
+        return json(response, 202, {
+          queued: true,
+          clientThreadId: result.clientThreadId || null,
+        });
+      }
+    } else {
+      result = await appServer.startThread({
+        cwd: process.cwd(),
+        ephemeral: Boolean(body.ephemeral),
+      });
+    }
     activeThreadId = result.thread.id;
     setCachedThread(result.thread.id, result.thread);
     upsertThreadListEntry(result.thread);

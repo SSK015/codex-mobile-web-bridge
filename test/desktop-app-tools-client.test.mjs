@@ -45,7 +45,7 @@ async function stop(server) {
   await new Promise((resolve) => server.close(resolve));
 }
 
-const tools = ['list_threads', 'read_thread', 'wait_threads', 'send_message_to_thread']
+const tools = ['list_threads', 'list_projects', 'create_thread', 'read_thread', 'wait_threads', 'send_message_to_thread']
   .map((name) => ({ name, namespace: 'codex_app' }));
 
 {
@@ -59,6 +59,8 @@ const tools = ['list_threads', 'read_thread', 'wait_threads', 'send_message_to_t
   const client = new DesktopAppToolsClient({ pipePath: pipe, contextThreadId: 'control-thread', requestTimeoutMs: 500 });
   try {
     assert.deepEqual(await client.listThreads({ limit: 3 }), { called: 'list_threads', args: { limit: 3 } });
+    assert.equal((await client.listProjects()).called, 'list_projects');
+    assert.equal((await client.createThread({ prompt: 'new', target: { type: 'projectless' } })).called, 'create_thread');
     assert.equal((await client.readThread({ threadId: 't1', turnLimit: 2 })).called, 'read_thread');
     assert.equal((await client.waitThreads({ targets: [{ threadId: 't1' }], timeoutMs: 0 })).called, 'wait_threads');
     assert.equal((await client.sendMessageToThread({ threadId: 't1', prompt: 'hello' })).called, 'send_message_to_thread');
