@@ -81,6 +81,9 @@ const mux = new AppServerRpcMultiplexer({
   listenUrl: 'ws://127.0.0.1:0/',
 });
 await mux.start();
+const preInitializeReady = await fetch(mux.boundUrl.replace(/^ws:/, 'http:') + 'readyz');
+assert.equal(preInitializeReady.status, 200);
+assert.equal((await preInitializeReady.json()).ready, false);
 
 const appServer = new CodexAppServer({
   codexPath: 'unused',
@@ -97,6 +100,9 @@ desktop.socket.send(JSON.stringify({ method: 'initialized', params: {} }));
 await mobileStart;
 assert.equal(appServer.ready, true);
 assert.equal(mux.ready, true);
+const postInitializeReady = await fetch(mux.boundUrl.replace(/^ws:/, 'http:') + 'readyz');
+assert.equal(postInitializeReady.status, 200);
+assert.equal((await postInitializeReady.json()).ready, true);
 assert.equal(upstreamConnectionCount, 1);
 assert.equal(upstreamInitializeCount, 1);
 

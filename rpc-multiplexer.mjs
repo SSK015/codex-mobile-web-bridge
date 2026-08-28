@@ -111,9 +111,14 @@ export class AppServerRpcMultiplexer extends EventEmitter {
     return this.started && this.initialized && this.upstream?.readyState === WebSocket.OPEN;
   }
 
+  get acceptingConnections() {
+    return this.started && this.upstream?.readyState === WebSocket.OPEN;
+  }
+
   get stats() {
     return {
       ready: this.ready,
+      acceptingConnections: this.acceptingConnections,
       upstreamConnected: this.upstream?.readyState === WebSocket.OPEN,
       desktopConnected: this.desktop?.socket?.readyState === WebSocket.OPEN,
       initialized: this.initialized,
@@ -206,7 +211,10 @@ export class AppServerRpcMultiplexer extends EventEmitter {
     const expectedPath = this.listen.pathname || '/';
     const server = http.createServer((request, response) => {
       if (request.url === '/readyz') {
-        const status = this.ready ? 200 : 503;
+        // Codex Desktop probes /readyz before it opens the WebSocket. Returning
+        // 503 until Desktop initializes would create a circular wait: Desktop
+        // waits for readyz, while the mux waits for Desktop's initialize.
+        const status = this.acceptingConnections ? 200 : 503;
         response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
         response.end(JSON.stringify(this.stats));
         return;
