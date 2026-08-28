@@ -301,6 +301,13 @@ async function route(request, response) {
       lastCompletedTurnId,
       authEnabled: Boolean(secret),
       appServerTransport: DESKTOP_CONTROL_MODE ? 'desktop-control' : (rpcMux ? 'rpc-mux' : (APP_SERVER_URL ? 'websocket' : 'stdio')),
+      capabilities: {
+        createThread: !DESKTOP_CONTROL_MODE,
+        steerTurn: !DESKTOP_CONTROL_MODE,
+        interruptTurn: !DESKTOP_CONTROL_MODE,
+        approvals: !DESKTOP_CONTROL_MODE,
+        attachments: true,
+      },
       ...(rpcMux ? { rpcMux: rpcMux.stats } : {}),
     });
   }

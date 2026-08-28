@@ -7,6 +7,8 @@ const state = {
   activeTurnThreadId: null,
   turnActivityPhase: null,
   turnLifecycleGeneration: 0,
+  canSteer: true,
+  canInterrupt: true,
   eventSource: null,
   pendingRequests: new Map(),
   toolAlerts: new Map(),
@@ -74,6 +76,8 @@ async function boot() {
   try {
     const status = await api('api/status');
     setOnline(status.ready);
+    state.canSteer = status.capabilities?.steerTurn !== false;
+    state.canInterrupt = status.capabilities?.interruptTurn !== false;
     if (status.activeThreadId) {
       state.activeTurnId = status.activeTurnId;
       state.activeTurnThreadId = status.activeTurnId ? status.activeThreadId : null;
@@ -2190,12 +2194,15 @@ function closeRequestDrawer() {
 function syncComposerState() {
   const busy = Boolean(state.activeTurnId && state.activeTurnThreadId === state.activeThread?.id);
   elements.send.classList.remove('hidden');
-  elements.stop.classList.toggle('hidden', !busy);
+  elements.stop.classList.toggle('hidden', !busy || !state.canInterrupt);
   elements.prompt.disabled = false;
-  elements.send.disabled = state.attachments.some((attachment) => ['queued', 'uploading'].includes(attachment.status));
+  elements.send.disabled = (busy && !state.canSteer)
+    || state.attachments.some((attachment) => ['queued', 'uploading'].includes(attachment.status));
   elements.attach.disabled = state.attachments.length >= 4;
-  elements.send.textContent = busy ? '追加' : '发送';
-  elements.prompt.placeholder = busy ? 'Codex 正在工作，可追加指令…' : '给 Codex 发消息…';
+  elements.send.textContent = busy ? (state.canSteer ? '追加' : '运行中') : '发送';
+  elements.prompt.placeholder = busy
+    ? (state.canSteer ? 'Codex 正在工作，可追加指令…' : 'Codex 正在工作；可先输入，完成后再发送…')
+    : '给 Codex 发消息…';
   syncTurnActivity(busy);
 }
 
