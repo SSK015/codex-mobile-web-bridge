@@ -348,7 +348,7 @@ elements.stop.addEventListener('click', async () => {
   });
   if (result.soft) {
     elements.stop.disabled = true;
-    elements.stop.textContent = '已请求停止';
+      elements.stop.textContent = '停止中';
     return;
   }
   state.turnLifecycleGeneration += 1;
@@ -2327,7 +2327,7 @@ function syncComposerState() {
   const busy = Boolean(state.activeTurnId && state.activeTurnThreadId === state.activeThread?.id);
   if (!busy) {
     elements.stop.disabled = false;
-    elements.stop.textContent = '请求停止';
+    elements.stop.textContent = '停止';
   }
   elements.send.classList.remove('hidden');
   elements.stop.classList.toggle('hidden', !busy || !state.canInterrupt);
