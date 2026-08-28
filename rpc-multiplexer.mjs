@@ -398,6 +398,7 @@ export class AppServerRpcMultiplexer extends EventEmitter {
   #handleDesktopInitialize(desktop, message) {
     if (this.initializeResponse) {
       this.#sendDesktop(desktop, { ...this.initializeResponse, id: message.id });
+      this.#completeInitialization(desktop);
       return;
     }
     const pendingInitialize = [...this.pendingUpstream.values()].find((pending) => pending.initialize);
@@ -478,14 +479,15 @@ export class AppServerRpcMultiplexer extends EventEmitter {
 
   #completeInitialization(desktop) {
     desktop.protocolReady = true;
-    if (this.initialized) return;
-    // Recent Desktop builds begin issuing RPC immediately after the successful
-    // initialize response and omit the optional initialized notification. Send
-    // it upstream on Desktop's behalf so both protocol variants work.
-    this.#sendUpstream({ method: 'initialized', params: {} });
-    this.initialized = true;
-    this.#resolveReady();
-    this.emit('log', 'RPC multiplexer initialized');
+    if (!this.initialized) {
+      // Recent Desktop builds begin issuing RPC immediately after the successful
+      // initialize response and omit the optional initialized notification. Send
+      // it upstream on Desktop's behalf so both protocol variants work.
+      this.#sendUpstream({ method: 'initialized', params: {} });
+      this.initialized = true;
+      this.#resolveReady();
+      this.emit('log', 'RPC multiplexer initialized');
+    }
     this.#deliverPendingServerRequests(desktop);
   }
 

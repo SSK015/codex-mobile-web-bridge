@@ -154,7 +154,6 @@ desktop = await connect(mux.boundUrl);
 desktop.socket.send(JSON.stringify({ method: 'initialize', id: 99, params: { clientInfo: { name: 'desktop-reconnect' } } }));
 const replayedInitialize = await desktop.probe.waitFor((message) => message.id === 99);
 assert.equal(replayedInitialize.result.serverInfo.name, 'mock-app-server');
-desktop.socket.send(JSON.stringify({ method: 'initialized', params: {} }));
 desktop.socket.send(JSON.stringify({ method: 'thread/read', id: 100, params: { threadId: 'after-reconnect' } }));
 const afterReconnect = await desktop.probe.waitFor((message) => message.id === 100);
 assert.equal(afterReconnect.result.thread.id, 'after-reconnect');
