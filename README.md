@@ -1,7 +1,22 @@
 # Codex Mobile Web Bridge
 
-An unofficial mobile web client for a Codex App Server running on your own
-computer.
+An unofficial mobile web client for Codex Desktop running on your own computer.
+
+```text
+phone browser
+    | HTTPS
+    v
+Codex Mobile bridge (loopback)
+    | approved codex_app tools
+    v
+Codex Desktop -- sole writer --> Desktop-owned App Server
+    ^
+    +-- read-only rollout fallback for missing long-history items
+```
+
+The bridge does not connect a second writer to Desktop tasks. Desktop remains
+the owner of every live task; mobile reads and writes are proxied through the
+native `codex_app` control channel.
 
 Use a phone browser to open local Codex tasks, steer running turns, inspect
 sanitized tool activity, answer approvals, upload files, and preview generated
@@ -99,13 +114,24 @@ the full shared experience.
 
 ## Connection modes
 
-### Single-connection shared mode - intended default experience
+### Desktop control - recommended experience
+
+On the verified Windows build, the bridge uses Desktop's native `codex_app`
+tools pipe. Desktop remains the sole task writer; the phone invokes approved
+Desktop operations for listing, reading, sending, running-turn append, project
+discovery, and task creation. Recent items omitted by `read_thread` can be
+recovered from local rollout files through a read-only fallback.
+
+This production path does not inject a `codex_app` transport into `config.toml`
+and does not start or share another Desktop App Server.
+
+### Single-connection shared mode - legacy experiment
 
 Codex currently associates a task's active writer with the client transport
 connection. Merely opening two WebSockets to one App Server is therefore not
-enough. The bridge includes an RPC multiplexer: a loopback proxy that gives
-Desktop and the mobile bridge one shared upstream connection while routing
-their request IDs, responses, notifications, and approval requests separately.
+enough. The repository retains an RPC multiplexer for protocol research, but
+current Desktop ownership behavior can reject or destabilize this setup. It is
+not the recommended deployment path.
 
 Start the bridge with both the private upstream App Server and the Desktop-facing
 multiplexer endpoint:
@@ -116,11 +142,9 @@ CODEX_MOBILE_RPC_MUX_LISTEN_URL=ws://127.0.0.1:4513 \
 node server.mjs
 ```
 
-Configure Codex Desktop to connect to `ws://127.0.0.1:4513`, never directly to
-the upstream `4512` endpoint. The multiplexer must start before Desktop so that
-Desktop performs the one allowed App Server initialization through it. Desktop
-integration remains version-dependent, so perform the switch only while tasks
-are idle and keep a rollback path.
+Do not configure Codex Desktop to connect to this route in normal deployment.
+Any experiment must use idle disposable tasks, version-specific acceptance
+tests, and an immediate rollback to an ordinary Desktop-owned App Server.
 
 See [shared mode](docs/shared-mode.md) and [architecture](docs/architecture.md).
 
