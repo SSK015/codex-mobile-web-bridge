@@ -4,6 +4,9 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CodexAppServer, isActiveWriterError, resumeThreadWithReadFallback } from './app-server-client.mjs';
+import { DesktopAppToolsClient } from './desktop-app-tools-client.mjs';
+import { discoverDesktopAppToolsPipe } from './desktop-app-tools-discovery.mjs';
+import { DesktopControlledAppServer } from './desktop-controlled-app-server.mjs';
 import { AppServerRpcMultiplexer } from './rpc-multiplexer.mjs';
 import { safeCommandPreview, safeFileChangePreview, safePreviewText } from './sanitizers.mjs';
 import { buildTurnInput } from './turn-input.mjs';
@@ -13,6 +16,8 @@ const PUBLIC = path.join(ROOT, 'public');
 const CODEX_PATH = process.env.CODEX_MOBILE_CODEX_PATH || (process.platform === 'win32' ? 'codex.exe' : 'codex');
 const APP_SERVER_URL = process.env.CODEX_MOBILE_APP_SERVER_URL || '';
 const RPC_MUX_LISTEN_URL = process.env.CODEX_MOBILE_RPC_MUX_LISTEN_URL || '';
+const DESKTOP_CONTROL_MODE = process.env.CODEX_MOBILE_DESKTOP_CONTROL === '1';
+const DESKTOP_CONTROL_THREAD_ID = String(process.env.CODEX_MOBILE_CONTROL_THREAD_ID || '').trim();
 const HOST = process.env.CODEX_MOBILE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CODEX_MOBILE_PORT || 4780);
 const SECRET_FILE = process.env.CODEX_MOBILE_SECRET_FILE || '';
@@ -84,15 +89,28 @@ const threadListCache = loadThreadListCache();
 if (RPC_MUX_LISTEN_URL && !APP_SERVER_URL) {
   throw new Error('CODEX_MOBILE_RPC_MUX_LISTEN_URL requires CODEX_MOBILE_APP_SERVER_URL');
 }
+if (DESKTOP_CONTROL_MODE && (APP_SERVER_URL || RPC_MUX_LISTEN_URL)) {
+  throw new Error('Desktop control mode cannot be combined with App Server WebSocket or RPC mux mode');
+}
+if (DESKTOP_CONTROL_MODE && !DESKTOP_CONTROL_THREAD_ID) {
+  throw new Error('CODEX_MOBILE_CONTROL_THREAD_ID is required in Desktop control mode');
+}
 const rpcMux = RPC_MUX_LISTEN_URL
   ? new AppServerRpcMultiplexer({ upstreamUrl: APP_SERVER_URL, listenUrl: RPC_MUX_LISTEN_URL })
   : null;
-const appServer = new CodexAppServer({
-  codexPath: CODEX_PATH,
-  cwd: process.cwd(),
-  websocketUrl: rpcMux ? null : (APP_SERVER_URL || null),
-  rpcTransport: rpcMux?.createInternalTransport() || null,
+const createDesktopControlClient = () => new DesktopAppToolsClient({
+  contextThreadId: DESKTOP_CONTROL_THREAD_ID,
+  discoverPipePath: () => discoverDesktopAppToolsPipe(),
+  requestTimeoutMs: 130_000,
 });
+const appServer = DESKTOP_CONTROL_MODE
+  ? new DesktopControlledAppServer({ clientFactory: createDesktopControlClient })
+  : new CodexAppServer({
+      codexPath: CODEX_PATH,
+      cwd: process.cwd(),
+      websocketUrl: rpcMux ? null : (APP_SERVER_URL || null),
+      rpcTransport: rpcMux?.createInternalTransport() || null,
+    });
 const sseClients = new Set();
 const threadCache = new Map();
 const threadCacheSizes = new Map();
@@ -221,7 +239,7 @@ appServer.on('error', (error) => broadcast({ type: 'appServerError', message: er
 rpcMux?.on('error', (error) => console.error(`RPC multiplexer error: ${error.message}`));
 rpcMux?.on('log', (message) => console.log(`RPC multiplexer: ${message}`));
 appServer.on('exit', (event) => {
-  if (APP_SERVER_URL && !event.intentional) {
+  if (!DESKTOP_CONTROL_MODE && APP_SERVER_URL && !event.intentional) {
     console.error(`Shared App Server connection exited unexpectedly (${event.code ?? 'unknown'}); restarting bridge process.`);
     setTimeout(() => process.exit(1), 25).unref();
   }
@@ -248,7 +266,7 @@ const server = http.createServer(async (request, response) => {
 server.listen(PORT, HOST, () => {
   console.log(`Codex Mobile Web listening on http://${HOST}:${PORT}`);
   console.log(`Authentication: ${secret ? 'enabled' : 'disabled (loopback testing only)'}`);
-  console.log(`App Server transport: ${rpcMux ? `single-connection RPC mux at ${rpcMux.boundUrl}` : (APP_SERVER_URL ? 'shared WebSocket' : 'private stdio')}`);
+  console.log(`App Server transport: ${DESKTOP_CONTROL_MODE ? 'Desktop app tools control pipe' : (rpcMux ? `single-connection RPC mux at ${rpcMux.boundUrl}` : (APP_SERVER_URL ? 'shared WebSocket' : 'private stdio'))}`);
 });
 
 async function route(request, response) {
@@ -282,7 +300,7 @@ async function route(request, response) {
       lastStartedTurnId,
       lastCompletedTurnId,
       authEnabled: Boolean(secret),
-      appServerTransport: rpcMux ? 'rpc-mux' : (APP_SERVER_URL ? 'websocket' : 'stdio'),
+      appServerTransport: DESKTOP_CONTROL_MODE ? 'desktop-control' : (rpcMux ? 'rpc-mux' : (APP_SERVER_URL ? 'websocket' : 'stdio')),
       ...(rpcMux ? { rpcMux: rpcMux.stats } : {}),
     });
   }
@@ -610,6 +628,12 @@ async function route(request, response) {
       }
       const input = buildTurnInput(text, attachments);
       if (activeTurnId && activeTurnThreadId === threadId) {
+        if (DESKTOP_CONTROL_MODE) {
+          const error = new Error('桌面 Codex 正在运行这个 task；请等待当前回复结束后再发送。');
+          error.statusCode = 409;
+          error.publicCode = 'TURN_ACTIVE';
+          throw error;
+        }
         if (activeTurnId === true) {
           const error = new Error('正在恢复运行中的回复，请稍后再追加');
           error.statusCode = 409;
@@ -771,7 +795,7 @@ async function route(request, response) {
     // Clients of one shared WebSocket server do not have that cross-process
     // lock, so disconnecting here is unnecessary and can leave a stale TCP
     // connection while the WebSocket close handshake times out.
-    if (!APP_SERVER_URL) await appServer.restart();
+    if (!DESKTOP_CONTROL_MODE && !APP_SERVER_URL) await appServer.restart();
     activeThreadId = null;
     activeTurnId = null;
     activeTurnThreadId = null;
@@ -780,7 +804,7 @@ async function route(request, response) {
     broadcast({ type: 'released' });
     return json(response, 200, {
       ok: true,
-      appServerDisconnected: !APP_SERVER_URL,
+      appServerDisconnected: !DESKTOP_CONTROL_MODE && !APP_SERVER_URL,
     });
   }
 
@@ -1334,6 +1358,16 @@ function publicItem(item) {
 
 function cleanUserMessageText(text) {
   const value = String(text || '').trim();
+  const delegation = value.match(/^<codex_delegation>\s*[\s\S]*?<input>([\s\S]*?)<\/input>\s*<\/codex_delegation>$/i);
+  if (delegation) {
+    return delegation[1]
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&quot;', '"')
+      .replaceAll('&#39;', "'")
+      .replaceAll('&amp;', '&')
+      .trim();
+  }
   if (!/^# Files mentioned by the user:/i.test(value)) return value;
   const requestMarker = value.match(/(?:^|\n)## My request:\s*\n/i);
   return requestMarker ? value.slice(requestMarker.index + requestMarker[0].length).trim() : value;
@@ -1938,6 +1972,17 @@ function scheduleThreadListRefresh({ force = false } = {}) {
   threadListRefreshPromise = (async () => {
     try {
       const refreshStartedAtSequence = threadListMutationSequence;
+      if (DESKTOP_CONTROL_MODE) {
+        const result = await appServer.listThreads({ limit: 50 });
+        const merged = new Map(threadListCache.threads.filter((thread) => thread?.id).map((thread) => [thread.id, thread]));
+        for (const thread of result.data || []) {
+          if (thread?.id) merged.set(thread.id, thread);
+        }
+        const threads = [...merged.values()].sort((left, right) => normalizeTimestamp(right.updatedAt) - normalizeTimestamp(left.updatedAt));
+        replaceThreadListCache(threads, { complete: false, refreshStartedAtSequence });
+        broadcast({ type: 'threadListUpdated', count: threadListCache.threads.length, updatedAt: threadListCache.updatedAt });
+        return;
+      }
       const threads = [];
       let cursor = null;
       let nextCursor = null;
