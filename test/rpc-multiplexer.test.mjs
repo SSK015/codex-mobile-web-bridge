@@ -90,7 +90,7 @@ const appServer = new CodexAppServer({
 const mobileStart = appServer.start();
 
 let desktop = await connect(mux.boundUrl);
-desktop.socket.send(JSON.stringify({ method: 'initialize', id: 'desktop-init', params: { clientInfo: { name: 'desktop-test' } } }));
+desktop.socket.send(Buffer.from(JSON.stringify({ method: 'initialize', id: 'desktop-init', params: { clientInfo: { name: 'desktop-test' } } })));
 const initializeResponse = await desktop.probe.waitFor((message) => message.id === 'desktop-init');
 assert.equal(initializeResponse.result.serverInfo.name, 'mock-app-server');
 desktop.socket.send(JSON.stringify({ method: 'initialized', params: {} }));

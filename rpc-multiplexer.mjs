@@ -256,13 +256,13 @@ export class AppServerRpcMultiplexer extends EventEmitter {
     const ws = new WebSocket(this.upstreamUrl, { perMessageDeflate: false, maxPayload: this.maxPayloadBytes });
     this.upstream = ws;
     ws.on('message', (data, isBinary) => {
-      if (isBinary) return this.#fail(new Error('App Server sent a binary WebSocket frame'), { code: 1003, reason: 'binary frame' });
       let message;
       try {
         message = JSON.parse(data.toString());
       } catch {
         return this.#fail(new Error('App Server sent invalid JSON'), { code: 1007, reason: 'invalid JSON' });
       }
+      if (isBinary) this.emit('log', 'upstream frame: binary UTF-8 JSON');
       this.#handleUpstreamMessage(message);
     });
     ws.on('error', (error) => {
@@ -303,15 +303,16 @@ export class AppServerRpcMultiplexer extends EventEmitter {
     }
     const desktop = { socket, protocolReady: false };
     this.desktop = desktop;
+    this.emit('log', 'desktop connected');
     socket.on('message', (data, isBinary) => {
       if (this.desktop !== desktop) return;
-      if (isBinary) return socket.close(1003, 'Binary frames are not supported');
       let message;
       try {
         message = JSON.parse(data.toString());
       } catch {
         return socket.close(1007, 'Invalid JSON');
       }
+      this.emit('log', `desktop message: ${String(message?.method || (message?.id != null ? 'response' : 'unknown'))}${isBinary ? ' (binary)' : ''}`);
       try {
         this.#handleDesktopMessage(desktop, message);
       } catch (error) {
@@ -339,6 +340,7 @@ export class AppServerRpcMultiplexer extends EventEmitter {
         this.desktopServerRequestIds.delete(id);
       }
       this.emit('desktopDisconnected');
+      this.emit('log', 'desktop disconnected');
     });
     socket.on('error', (error) => {
       if (this.listenerCount('error') > 0) this.emit('error', error);
@@ -376,6 +378,7 @@ export class AppServerRpcMultiplexer extends EventEmitter {
         this.#sendUpstream(message);
         this.initialized = true;
         this.#resolveReady();
+        this.emit('log', 'RPC multiplexer initialized');
       }
       this.#deliverPendingServerRequests(desktop);
       return;
@@ -436,6 +439,7 @@ export class AppServerRpcMultiplexer extends EventEmitter {
           this.initializeAccepted = true;
           this.initializeResponse = { ...message };
           delete this.initializeResponse.id;
+          this.emit('log', 'upstream initialize accepted');
         } else {
           this.#rejectReady(new Error(message.error.message || 'App Server initialization failed'));
         }

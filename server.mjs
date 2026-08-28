@@ -206,6 +206,7 @@ appServer.on('serverRequest', (message) => {
 appServer.on('exit', (event) => broadcast({ type: 'appServerExit', event }));
 appServer.on('error', (error) => broadcast({ type: 'appServerError', message: error.message }));
 rpcMux?.on('error', (error) => console.error(`RPC multiplexer error: ${error.message}`));
+rpcMux?.on('log', (message) => console.log(`RPC multiplexer: ${message}`));
 appServer.on('exit', (event) => {
   if (APP_SERVER_URL && !event.intentional) {
     console.error(`Shared App Server connection exited unexpectedly (${event.code ?? 'unknown'}); restarting bridge process.`);
