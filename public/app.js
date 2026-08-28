@@ -212,18 +212,20 @@ elements.prompt.addEventListener('keydown', (event) => {
 
 elements.stop.addEventListener('click', async () => {
   if (!state.activeThread || !state.activeTurnId) return;
-  try {
-    await api(`api/threads/${encodeURIComponent(state.activeThread.id)}/interrupt`, {
-      method: 'POST',
-      body: { turnId: state.activeTurnId === true ? null : state.activeTurnId },
-    });
-  } finally {
-    state.turnLifecycleGeneration += 1;
-    state.activeTurnId = null;
-    state.activeTurnThreadId = null;
-    state.turnActivityPhase = null;
-    syncComposerState();
+  const result = await api(`api/threads/${encodeURIComponent(state.activeThread.id)}/interrupt`, {
+    method: 'POST',
+    body: { turnId: state.activeTurnId === true ? null : state.activeTurnId },
+  });
+  if (result.soft) {
+    elements.stop.disabled = true;
+    elements.stop.textContent = '已请求停止';
+    return;
   }
+  state.turnLifecycleGeneration += 1;
+  state.activeTurnId = null;
+  state.activeTurnThreadId = null;
+  state.turnActivityPhase = null;
+  syncComposerState();
 });
 
 async function loadThreads({ forceRefresh = false } = {}) {
@@ -2193,6 +2195,10 @@ function closeRequestDrawer() {
 
 function syncComposerState() {
   const busy = Boolean(state.activeTurnId && state.activeTurnThreadId === state.activeThread?.id);
+  if (!busy) {
+    elements.stop.disabled = false;
+    elements.stop.textContent = '请求停止';
+  }
   elements.send.classList.remove('hidden');
   elements.stop.classList.toggle('hidden', !busy || !state.canInterrupt);
   elements.prompt.disabled = false;

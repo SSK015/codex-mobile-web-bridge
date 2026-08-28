@@ -304,7 +304,8 @@ async function route(request, response) {
       capabilities: {
         createThread: !DESKTOP_CONTROL_MODE,
         steerTurn: true,
-        interruptTurn: !DESKTOP_CONTROL_MODE,
+        interruptTurn: true,
+        interruptMode: DESKTOP_CONTROL_MODE ? 'soft-message' : 'hard',
         approvals: !DESKTOP_CONTROL_MODE,
         attachments: true,
       },
@@ -675,12 +676,12 @@ async function route(request, response) {
       }
     }
     if (!turnId) return json(response, 200, { ok: true, alreadyIdle: true });
-    await appServer.interruptTurn(threadId, turnId);
-    if (!activeTurnThreadId || activeTurnThreadId === threadId) {
+    const interruption = await appServer.interruptTurn(threadId, turnId);
+    if (!interruption?.soft && (!activeTurnThreadId || activeTurnThreadId === threadId)) {
       activeTurnId = null;
       activeTurnThreadId = null;
     }
-    return json(response, 200, { ok: true });
+    return json(response, 200, { ok: true, soft: Boolean(interruption?.soft) });
   }
 
   if (request.method === 'GET' && pathname === '/api/requests') {

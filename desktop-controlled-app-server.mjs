@@ -203,12 +203,13 @@ export class DesktopControlledAppServer extends EventEmitter {
     return { turnId: turnId || null };
   }
 
-  interruptTurn() {
-    return Promise.reject(controlledError(
-      'Desktop control channel cannot interrupt an active turn',
-      'DESKTOP_CONTROL_INTERRUPT_UNSUPPORTED',
-      501,
-    ));
+  async interruptTurn(threadId) {
+    this.#assertReady();
+    await this.client.sendMessageToThread({
+      threadId,
+      prompt: '请暂时停止当前任务：不要再启动新的工具调用，并在当前工具调用返回后尽快结束本轮。',
+    });
+    return { soft: true };
   }
 
   startThread() {

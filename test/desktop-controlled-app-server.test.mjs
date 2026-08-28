@@ -84,7 +84,9 @@ assert.equal(page.nextCursor, 'older');
 const steered = await app.steerTurn('recent', 'new', 'more');
 assert.equal(steered.turnId, 'new');
 assert.deepEqual(client.sent.at(-1), { threadId: 'recent', prompt: 'more' });
-await assert.rejects(app.interruptTurn('recent', 'new'), (error) => error.code === 'DESKTOP_CONTROL_INTERRUPT_UNSUPPORTED');
+const interrupted = await app.interruptTurn('recent', 'new');
+assert.equal(interrupted.soft, true);
+assert.match(client.sent.at(-1).prompt, /暂时停止当前任务/);
 await assert.rejects(app.startThread(), (error) => error.code === 'DESKTOP_CONTROL_START_THREAD_UNSUPPORTED');
 await assert.rejects(app.restart(), (error) => error.code === 'DESKTOP_CONTROL_RESTART_UNSUPPORTED');
 
