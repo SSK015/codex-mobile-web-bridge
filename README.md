@@ -195,6 +195,11 @@ experimental. When reporting a compatibility issue, include the Codex version,
 operating system, transport mode, and a redacted message shape. Never include a
 real task transcript or credential.
 
+Before accepting a Codex Desktop update, follow the
+[Codex update checklist](docs/codex-update-checklist.md). It records the
+known-good version and tool catalog, verifies idle and active-turn messaging,
+checks long-history recovery, and defines a Desktop-safe rollback boundary.
+
 Private stdio should not be described as the normal user experience.
 Single-connection shared mode is the product path; private stdio remains a
 diagnostic and compatibility fallback.
