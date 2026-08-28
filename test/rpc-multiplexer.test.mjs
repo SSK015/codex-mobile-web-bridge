@@ -48,6 +48,22 @@ async function connect(url) {
   return { socket, probe: new MessageProbe(socket) };
 }
 
+function waitForUpstream(predicate, timeoutMs = 3_000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      upstreamMessages.off('message', onMessage);
+      reject(new Error('Timed out waiting for upstream message'));
+    }, timeoutMs);
+    const onMessage = (message) => {
+      if (!predicate(message)) return;
+      clearTimeout(timer);
+      upstreamMessages.off('message', onMessage);
+      resolve(message);
+    };
+    upstreamMessages.on('message', onMessage);
+  });
+}
+
 const upstreamHttp = http.createServer();
 const upstreamWss = new WebSocketServer({ noServer: true });
 const upstreamMessages = new EventEmitter();
@@ -93,6 +109,7 @@ const appServer = new CodexAppServer({
   cwd: process.cwd(),
   rpcTransport: mux.createInternalTransport(),
 });
+appServer.on('error', () => {});
 const mobileStart = appServer.start();
 
 let desktop = await connect(mux.boundUrl);
@@ -114,9 +131,25 @@ desktop.socket.send(JSON.stringify({ method: 'thread/read', id: 7, params: { thr
 const desktopRead = await desktop.probe.waitFor((message) => message.id === 7);
 assert.equal(desktopRead.result.thread.id, 'desktop-thread');
 
+const numericServerRequest = once(appServer, 'serverRequest');
+upstreamSocket.send(JSON.stringify({
+  method: 'item/commandExecution/requestApproval',
+  id: 3,
+  params: { threadId: 'desktop-thread', turnId: 'turn-shared', command: 'echo numeric' },
+}));
+const [numericRequest] = await numericServerRequest;
+assert.equal(numericRequest.id, 3);
+
+const mobileTurnOnWire = waitForUpstream((message) => message.method === 'turn/start');
 const mobileTurn = await appServer.startTurn('desktop-thread', 'hello through the mux');
+const mobileTurnRequest = await mobileTurnOnWire;
+assert.notEqual(mobileTurnRequest.id, numericRequest.id);
 assert.equal(mobileTurn.turn.id, 'turn-from-mobile');
 assert.equal(upstreamConnectionCount, 1);
+
+const numericResponseAtUpstream = waitForUpstream((message) => message.id === numericRequest.id && !message.method);
+appServer.respondToServerRequest(numericRequest.id, { decision: 'decline' });
+assert.deepEqual((await numericResponseAtUpstream).result, { decision: 'decline' });
 
 const mobileNotification = once(appServer, 'notification');
 upstreamSocket.send(JSON.stringify({ method: 'turn/started', params: { threadId: 'desktop-thread', turn: { id: 'turn-shared' } } }));
@@ -148,6 +181,23 @@ const approvalResponseAtUpstream = new Promise((resolve) => {
 appServer.respondToServerRequest('approval-upstream', { decision: 'accept' });
 assert.deepEqual((await approvalResponseAtUpstream).result, { decision: 'accept' });
 
+const staleServerRequest = once(appServer, 'serverRequest');
+upstreamSocket.send(JSON.stringify({
+  method: 'item/commandExecution/requestApproval',
+  id: 'stale-upstream',
+  params: { threadId: 'desktop-thread', turnId: 'turn-stale', command: 'echo stale' },
+}));
+await staleServerRequest;
+assert.equal(mux.stats.pendingServerRequests, 1);
+const staleCompletion = once(appServer, 'notification');
+upstreamSocket.send(JSON.stringify({
+  method: 'turn/completed',
+  params: { threadId: 'desktop-thread', turn: { id: 'turn-stale' } },
+}));
+const [staleCompletionMessage] = await staleCompletion;
+assert.equal(staleCompletionMessage.method, 'turn/completed');
+assert.equal(mux.stats.pendingServerRequests, 0);
+
 desktop.socket.close(1000, 'test reconnect');
 await once(desktop.socket, 'close');
 desktop = await connect(mux.boundUrl);
@@ -159,6 +209,30 @@ const afterReconnect = await desktop.probe.waitFor((message) => message.id === 1
 assert.equal(afterReconnect.result.thread.id, 'after-reconnect');
 assert.equal(upstreamInitializeCount, 1);
 assert.equal(upstreamConnectionCount, 1);
+assert.equal(desktop.probe.messages.some((message) => message.method === 'item/commandExecution/requestApproval'), false);
+
+const duplicateRequest = once(appServer, 'serverRequest');
+upstreamSocket.send(JSON.stringify({
+  method: 'item/commandExecution/requestApproval',
+  id: 'duplicate-upstream',
+  params: { threadId: 'desktop-thread', command: 'echo duplicate' },
+}));
+await duplicateRequest;
+const upstreamExit = once(mux, 'upstreamExit');
+const desktopClose = once(desktop.socket, 'close');
+upstreamSocket.send(JSON.stringify({
+  method: 'item/commandExecution/requestApproval',
+  id: 'duplicate-upstream',
+  params: { threadId: 'desktop-thread', command: 'echo duplicate again' },
+}));
+await upstreamExit;
+await desktopClose;
+assert.equal(mux.ready, false);
+assert.equal(mux.initialized, false);
+assert.equal(mux.stats.upstreamConnected, false);
+assert.equal(mux.stats.acceptingConnections, false);
+assert.equal(mux.stats.pendingServerRequests, 0);
+assert.equal(appServer.ready, false);
 
 await appServer.stop();
 await mux.stop();

@@ -69,6 +69,8 @@ class MultiplexedRpcTransport extends EventEmitter {
 
   fail(error, event) {
     if (!this.active) return;
+    this.active = false;
+    this.multiplexer.unregisterInternalTransport(this);
     if (this.listenerCount('error') > 0) this.emit('error', error);
     this.emit('close', event);
   }
@@ -305,6 +307,10 @@ export class AppServerRpcMultiplexer extends EventEmitter {
   }
 
   #acceptDesktop(socket) {
+    if (!this.started || this.upstream?.readyState !== WebSocket.OPEN) {
+      socket.close(1013, 'RPC multiplexer is unavailable');
+      return;
+    }
     if (this.desktop?.socket?.readyState === WebSocket.OPEN) {
       socket.close(1013, 'A desktop client is already connected');
       return;
@@ -332,8 +338,8 @@ export class AppServerRpcMultiplexer extends EventEmitter {
       }
     });
     socket.on('close', () => {
-      if (this.desktop !== desktop) return;
-      this.desktop = null;
+      const wasCurrentDesktop = this.desktop === desktop;
+      if (wasCurrentDesktop) this.desktop = null;
       for (const [id, pending] of this.pendingUpstream.entries()) {
         // The upstream accepts initialize only once. Preserve an in-flight
         // initialize across a renderer reconnect so its response can be cached
@@ -342,11 +348,16 @@ export class AppServerRpcMultiplexer extends EventEmitter {
           this.pendingUpstream.delete(id);
         }
       }
-      for (const [id, upstreamKey] of this.desktopServerRequestIds.entries()) {
-        const request = this.serverRequests.get(upstreamKey);
-        if (request?.desktop === desktop) request.desktop = null;
+      for (const [id, route] of this.desktopServerRequestIds.entries()) {
+        if (route.desktop !== desktop) continue;
+        const request = this.serverRequests.get(route.upstreamKey);
+        if (request?.desktop === desktop) {
+          request.desktop = null;
+          request.desktopId = null;
+        }
         this.desktopServerRequestIds.delete(id);
       }
+      if (!wasCurrentDesktop) return;
       this.emit('desktopDisconnected');
       this.emit('log', 'desktop disconnected');
     });
@@ -369,12 +380,12 @@ export class AppServerRpcMultiplexer extends EventEmitter {
     }
     if (message.id != null && !message.method) {
       const desktopKey = rpcIdKey(message.id);
-      const upstreamKey = this.desktopServerRequestIds.get(desktopKey);
-      if (!upstreamKey) return;
-      const request = this.serverRequests.get(upstreamKey);
+      const route = this.desktopServerRequestIds.get(desktopKey);
+      if (!route) return;
+      const request = this.serverRequests.get(route.upstreamKey);
       this.desktopServerRequestIds.delete(desktopKey);
       if (!request) return;
-      this.serverRequests.delete(upstreamKey);
+      this.#clearServerRequest(request.id);
       this.#sendUpstream({ ...message, id: request.id });
       return;
     }
@@ -460,6 +471,18 @@ export class AppServerRpcMultiplexer extends EventEmitter {
     }
     if (message.id != null && message.method) {
       const upstreamKey = rpcIdKey(message.id);
+      if (this.pendingUpstream.has(upstreamKey) || this.serverRequests.has(upstreamKey)) {
+        return this.#fail(new Error(`Duplicate upstream RPC id ${String(message.id)}`), {
+          code: 1002,
+          reason: 'duplicate upstream RPC id',
+        });
+      }
+      if (this.serverRequests.size >= this.maxPendingRequests) {
+        return this.#fail(new Error('RPC server request limit reached'), {
+          code: 1013,
+          reason: 'server request limit',
+        });
+      }
       this.serverRequests.set(upstreamKey, { id: message.id, message, desktop: null });
       for (const transport of this.internalTransports) transport.deliver(message);
       if (this.desktop?.protocolReady) this.#deliverServerRequestToDesktop(this.desktop, upstreamKey);
@@ -468,6 +491,22 @@ export class AppServerRpcMultiplexer extends EventEmitter {
     if (!message.method) return;
     if (message.method === 'serverRequest/resolved') {
       this.#clearServerRequest(message.params?.requestId);
+    } else if (message.method === 'turn/completed') {
+      const threadId = message.params?.threadId || null;
+      const turnId = message.params?.turnId || message.params?.turn?.id || null;
+      if (threadId || turnId) this.#pruneServerRequests({ threadId, turnId });
+    } else if (message.method === 'thread/deleted') {
+      const threadId = message.params?.threadId || null;
+      if (threadId) this.#pruneServerRequests({ threadId });
+    } else if (message.method === 'thread/status/changed') {
+      const status = message.params?.status?.type || message.params?.status;
+      const threadId = message.params?.threadId || null;
+      if (status === 'idle' && threadId) this.#pruneServerRequests({ threadId });
+    } else if (message.method === 'item/completed' && message.params?.item?.type === 'dynamicToolCall') {
+      const threadId = message.params?.threadId || null;
+      const turnId = message.params?.turnId || message.params?.turn?.id || null;
+      const callId = message.params?.item?.id || null;
+      if (threadId || turnId || callId) this.#pruneServerRequests({ threadId, turnId, callId });
     }
     for (const transport of this.internalTransports) transport.deliver(message);
     if (this.desktop?.protocolReady) this.#sendDesktop(this.desktop, message);
@@ -497,7 +536,7 @@ export class AppServerRpcMultiplexer extends EventEmitter {
     const desktopId = this.nextDesktopServerRequestId--;
     request.desktop = desktop;
     request.desktopId = desktopId;
-    this.desktopServerRequestIds.set(rpcIdKey(desktopId), upstreamKey);
+    this.desktopServerRequestIds.set(rpcIdKey(desktopId), { upstreamKey, desktop });
     this.#sendDesktop(desktop, { ...request.message, id: desktopId });
   }
 
@@ -514,15 +553,28 @@ export class AppServerRpcMultiplexer extends EventEmitter {
     const upstreamKey = rpcIdKey(id);
     const request = this.serverRequests.get(upstreamKey);
     if (!request) return;
-    if (request.desktopId != null) this.desktopServerRequestIds.delete(rpcIdKey(request.desktopId));
+    for (const [desktopKey, route] of this.desktopServerRequestIds.entries()) {
+      if (route.upstreamKey === upstreamKey) this.desktopServerRequestIds.delete(desktopKey);
+    }
     this.serverRequests.delete(upstreamKey);
+  }
+
+  #pruneServerRequests({ threadId = null, turnId = null, callId = null } = {}) {
+    for (const request of [...this.serverRequests.values()]) {
+      const params = request.message?.params || {};
+      if (threadId && params.threadId !== threadId) continue;
+      if (turnId && params.turnId !== turnId) continue;
+      if (callId && params.callId !== callId && params.itemId !== callId) continue;
+      this.#clearServerRequest(request.id);
+    }
   }
 
   #allocateUpstreamId() {
     for (let attempts = 0; attempts < this.maxPendingRequests + 1; attempts += 1) {
       const candidate = this.nextUpstreamId++;
       if (this.nextUpstreamId >= Number.MAX_SAFE_INTEGER) this.nextUpstreamId = 1;
-      if (!this.pendingUpstream.has(rpcIdKey(candidate))) return candidate;
+      const key = rpcIdKey(candidate);
+      if (!this.pendingUpstream.has(key) && !this.serverRequests.has(key)) return candidate;
     }
     throw new Error('Unable to allocate an RPC request id');
   }
@@ -568,12 +620,19 @@ export class AppServerRpcMultiplexer extends EventEmitter {
 
   #fail(error, event) {
     if (!this.started) return;
+    const upstream = this.upstream;
+    this.started = false;
+    this.initialized = false;
+    this.initializeAccepted = false;
+    this.initializeResponse = null;
+    this.upstream = null;
     this.#rejectReady(error);
     this.#rejectPending(error);
     for (const transport of this.internalTransports) transport.fail(error, event);
     if (this.desktop?.socket?.readyState === WebSocket.OPEN) {
       this.desktop.socket.close(1012, 'Upstream App Server disconnected');
     }
+    if (upstream && upstream.readyState < WebSocket.CLOSING) upstream.terminate();
     this.emit('upstreamExit', event);
   }
 

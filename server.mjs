@@ -123,11 +123,35 @@ setInterval(() => {
 let activeThreadId = null;
 let activeTurnId = null;
 let activeTurnThreadId = null;
+let lastStartedTurnId = null;
+let lastCompletedTurnId = null;
+let messageSubmissionTail = Promise.resolve();
 let takeoverGeneration = 0;
 let appServerEventSequence = 0;
 
+function applyTurnLifecycleNotification(message) {
+  if (message.method === 'turn/started') {
+    const startedThreadId = message.params?.threadId || message.params?.turn?.threadId;
+    activeTurnId = message.params?.turn?.id ?? message.params?.turnId ?? activeTurnId;
+    activeTurnThreadId = startedThreadId || activeTurnThreadId;
+    lastStartedTurnId = message.params?.turn?.id ?? message.params?.turnId ?? lastStartedTurnId;
+    forgetEmptyThread(startedThreadId);
+    updateThreadListStatus(startedThreadId, { type: 'active' });
+    return;
+  }
+  if (message.method === 'turn/completed') {
+    const threadId = message.params?.threadId;
+    lastCompletedTurnId = message.params?.turn?.id ?? message.params?.turnId ?? lastCompletedTurnId;
+    if (!activeTurnThreadId || activeTurnThreadId === threadId) {
+      activeTurnId = null;
+      activeTurnThreadId = null;
+    }
+  }
+}
+
 appServer.on('notification', async (message) => {
   const eventSequence = ++appServerEventSequence;
+  applyTurnLifecycleNotification(message);
   await prepareItemAssets(message.params?.item);
   const notificationThreadId = message.params?.threadId || null;
   const notificationTurnId = message.params?.turnId || message.params?.turn?.id || null;
@@ -170,19 +194,8 @@ appServer.on('notification', async (message) => {
   }
   const publicEvent = sanitizeNotification(message, eventSequence);
   if (publicEvent) broadcast(publicEvent);
-  if (message.method === 'turn/started') {
-    const startedThreadId = message.params?.threadId || message.params?.turn?.threadId;
-    forgetEmptyThread(startedThreadId);
-    updateThreadListStatus(startedThreadId, { type: 'active' });
-    activeTurnId = message.params?.turn?.id ?? message.params?.turnId ?? activeTurnId;
-    activeTurnThreadId = startedThreadId || activeTurnThreadId;
-  }
   if (message.method === 'turn/completed') {
     const threadId = message.params?.threadId;
-    if (!activeTurnThreadId || activeTurnThreadId === threadId) {
-      activeTurnId = null;
-      activeTurnThreadId = null;
-    }
     if (threadId) {
       // Ephemeral threads deliberately have no readable on-disk history. The
       // browser already received their complete turn over SSE, so replacing it
@@ -266,6 +279,8 @@ async function route(request, response) {
       ready: appServer.ready,
       activeThreadId,
       activeTurnId,
+      lastStartedTurnId,
+      lastCompletedTurnId,
       authEnabled: Boolean(secret),
       appServerTransport: rpcMux ? 'rpc-mux' : (APP_SERVER_URL ? 'websocket' : 'stdio'),
       ...(rpcMux ? { rpcMux: rpcMux.stats } : {}),
@@ -399,6 +414,7 @@ async function route(request, response) {
       return json(response, 200, { thread: publicThread(responseThread), activeTurnId, desktopWriter });
     } catch (error) {
       if (isThreadNotFound(error)) evictThreadData(threadId);
+      if (rpcMux && isActiveWriterError(error)) throw createActiveWriterError();
       if (!rpcMux && isActiveWriterError(error)) {
         error.statusCode = 409;
         error.publicCode = 'ACTIVE_WRITER';
@@ -582,43 +598,44 @@ async function route(request, response) {
       error.statusCode = 409;
       throw error;
     }
-    await ensureWritableThread(threadId);
-    const body = await readJson(request);
-    const text = String(body.text || '').trim();
-    const attachments = await resolveUploadAttachments(threadId, body.attachments);
-    if (!text && attachments.length === 0) {
-      const error = new Error('消息或附件不能为空');
-      error.statusCode = 400;
-      throw error;
-    }
-    const input = buildTurnInput(text, attachments);
-    if (activeTurnId && activeTurnThreadId === threadId) {
-      if (activeTurnId === true) {
-        const error = new Error('正在恢复运行中的回复，请稍后再追加');
-        error.statusCode = 409;
+    const submission = await enqueueMessageSubmission(async () => {
+      await ensureWritableThread(threadId);
+      const body = await readJson(request);
+      const text = String(body.text || '').trim();
+      const attachments = await resolveUploadAttachments(threadId, body.attachments);
+      if (!text && attachments.length === 0) {
+        const error = new Error('消息或附件不能为空');
+        error.statusCode = 400;
         throw error;
+      }
+      const input = buildTurnInput(text, attachments);
+      if (activeTurnId && activeTurnThreadId === threadId) {
+        if (activeTurnId === true) {
+          const error = new Error('正在恢复运行中的回复，请稍后再追加');
+          error.statusCode = 409;
+          throw error;
+        }
+        let result;
+        try {
+          result = await appServer.steerTurn(threadId, activeTurnId, input);
+        } catch (error) {
+          throw mapMessageWriteError(error);
+        }
+        attachments.forEach((attachment) => { attachment.claimed = true; });
+        return { turn: { id: result.turnId }, steered: true };
       }
       let result;
       try {
-        result = await appServer.steerTurn(threadId, activeTurnId, input);
+        result = await appServer.startTurn(threadId, input);
       } catch (error) {
-        if (APP_SERVER_URL && !rpcMux && (isActiveWriterError(error) || isThreadNotFound(error))) throw createDesktopWriterError();
-        throw error;
+        throw mapMessageWriteError(error);
       }
       attachments.forEach((attachment) => { attachment.claimed = true; });
-      return json(response, 202, { turn: { id: result.turnId }, steered: true });
-    }
-    let result;
-    try {
-      result = await appServer.startTurn(threadId, input);
-    } catch (error) {
-      if (APP_SERVER_URL && !rpcMux && (isActiveWriterError(error) || isThreadNotFound(error))) throw createDesktopWriterError();
-      throw error;
-    }
-    attachments.forEach((attachment) => { attachment.claimed = true; });
-    activeTurnId = result.turn?.id || null;
-    activeTurnThreadId = activeTurnId ? threadId : null;
-    return json(response, 202, { turn: result.turn, steered: false });
+      activeTurnId = result.turn?.id || null;
+      activeTurnThreadId = activeTurnId ? threadId : null;
+      return { turn: result.turn, steered: false };
+    });
+    return json(response, 202, submission);
   }
 
   const interruptMatch = pathname.match(/^\/api\/threads\/([^/]+)\/interrupt$/);
@@ -1063,10 +1080,32 @@ function isThreadNotFound(error) {
   return /not found|unknown thread|does not exist|deleted/i.test(String(error?.message || ''));
 }
 
+function enqueueMessageSubmission(operation) {
+  const next = messageSubmissionTail.then(operation, operation);
+  messageSubmissionTail = next.catch(() => {});
+  return next;
+}
+
+function createActiveWriterError() {
+  const error = new Error('App Server reports that this task already has an active writer.');
+  error.statusCode = 409;
+  error.publicCode = 'ACTIVE_WRITER';
+  return error;
+}
+
 function createDesktopWriterError() {
   const error = new Error('桌面 Codex 正持有这个 task 的写入权。当前网页可跟随查看；请先在桌面切换到其他 task，再从手机发送。');
   error.statusCode = 409;
   error.publicCode = 'DESKTOP_WRITER';
+  return error;
+}
+
+function mapMessageWriteError(error) {
+  if (isActiveWriterError(error)) {
+    if (rpcMux) return createActiveWriterError();
+    if (APP_SERVER_URL) return createDesktopWriterError();
+  }
+  if (APP_SERVER_URL && !rpcMux && isThreadNotFound(error)) return createDesktopWriterError();
   return error;
 }
 
@@ -1086,7 +1125,8 @@ async function ensureWritableThread(threadId) {
     setCachedThread(threadId, writable);
     broadcast({ type: 'threadSnapshot', thread: publicThread(writable) });
   } catch (error) {
-    if (isActiveWriterError(error) || isThreadNotFound(error)) throw createDesktopWriterError();
+    if (isActiveWriterError(error)) throw rpcMux ? createActiveWriterError() : createDesktopWriterError();
+    if (isThreadNotFound(error)) throw createDesktopWriterError();
     throw error;
   }
 }
