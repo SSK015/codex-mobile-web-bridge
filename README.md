@@ -2,17 +2,7 @@
 
 An unofficial mobile web client for Codex Desktop running on your own computer.
 
-```text
-phone browser
-    | HTTPS
-    v
-Codex Mobile bridge (loopback)
-    | approved codex_app tools
-    v
-Codex Desktop -- sole writer --> Desktop-owned App Server
-    ^
-    +-- read-only rollout fallback for missing long-history items
-```
+![Codex Mobile architecture](assets/architecture.svg)
 
 The bridge does not connect a second writer to Desktop tasks. Desktop remains
 the owner of every live task; mobile reads and writes are proxied through the
@@ -36,6 +26,26 @@ streaming the desktop.
 - Authenticated image viewing and local artifact preview/download
 - Phone file upload and clipboard-image upload with progress and deduplication
 - Browser Back/edge-swipe navigation
+
+## Mobile preview
+
+The screenshots below use the real mobile UI with a fully synthetic demo
+dataset. They contain no task transcript, local path, account, credential, or
+public endpoint.
+
+<table>
+  <tr>
+    <td width="50%"><img src="assets/demo-task-list.png" alt="Sanitized Codex Mobile task list showing running, unread, viewed, and empty states"></td>
+    <td width="50%"><img src="assets/demo-conversation.png" alt="Sanitized Codex Mobile conversation showing messages, collapsed tool activity, model controls, and composer"></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>Task status at a glance</strong></td>
+    <td align="center"><strong>Read, append, upload, and choose a model</strong></td>
+  </tr>
+</table>
+
+Contributors can reproduce the synthetic UI locally with `npm run demo`. The
+demo server never connects to Codex and must not be used for real tasks.
 - Loopback-only default binding and password authentication
 
 ## Requirements
@@ -229,7 +239,7 @@ verified baseline, not a claim that other combinations are incompatible.
 | Codex Desktop | Microsoft Store MSIX `26.820.9563.0` | Verified |
 | Codex CLI bundled with Desktop | `codex-cli 0.150.0-alpha.8` | Verified |
 | Desktop-control transport | Native `codex_app` tools pipe with Desktop as the sole writer | Verified |
-| Mobile browsers | Chromium-based Android/HarmonyOS browser | Verified manually |
+| Mobile browsers | Chrome `151.0.7922.169` on Pixel 10 Pro / Android 16; Chromium-based Huawei HarmonyOS browser | Verified manually |
 | macOS | Not yet tested | Unverified |
 | Linux | Not yet tested | Unverified |
 | Other Codex Desktop releases | Run the update checklist before enabling writes | Unverified |

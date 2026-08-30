@@ -18,7 +18,8 @@
   },
   "scripts": {
     "start": "node server.mjs",
-    "check": "node --check server.mjs && node --check app-server-client.mjs && node --check rpc-multiplexer.mjs && node --check desktop-app-tools-client.mjs && node --check desktop-app-tools-discovery.mjs && node --check rollout-history-reader.mjs && node --check desktop-controlled-app-server.mjs && node --check public/app.js",
+    "demo": "node scripts/demo-server.mjs",
+    "check": "node --check server.mjs && node --check app-server-client.mjs && node --check rpc-multiplexer.mjs && node --check desktop-app-tools-client.mjs && node --check desktop-app-tools-discovery.mjs && node --check rollout-history-reader.mjs && node --check desktop-controlled-app-server.mjs && node --check scripts/demo-server.mjs && node --check public/app.js",
     "test": "node test/turn-input.test.mjs && node test/sanitizers.test.mjs && node test/app-server-client.test.mjs && node test/rpc-multiplexer.test.mjs && node test/desktop-app-tools-client.test.mjs && node test/desktop-app-tools-discovery.test.mjs && node test/rollout-history-reader.test.mjs && node test/desktop-controlled-app-server.test.mjs && node test/server.test.mjs && node test/server.desktop-control.test.mjs && node test/ui.test.mjs",
     "test:mux:real": "node test/rpc-multiplexer.real-smoke.mjs",
     "test:mux:http": "node test/rpc-multiplexer.http-smoke.mjs",

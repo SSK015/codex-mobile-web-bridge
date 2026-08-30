@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img" aria-labelledby="title desc">
+  <title id="title">Codex Mobile Web Bridge architecture</title>
+  <desc id="desc">A phone connects over authenticated HTTPS to a loopback bridge. The bridge uses approved codex_app tools to ask Codex Desktop, the sole writer, to control its private App Server. A read-only rollout fallback fills missing long-history messages.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f8fbff"/>
+      <stop offset="1" stop-color="#eef7f4"/>
+    </linearGradient>
+    <linearGradient id="bridge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f766e"/>
+      <stop offset="1" stop-color="#115e59"/>
+    </linearGradient>
+    <linearGradient id="desktop" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#0f172a" flood-opacity=".12"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0f766e"/>
+    </marker>
+    <style>
+      .title{font:700 25px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#0f172a}
+      .subtitle{font:500 13px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#64748b;letter-spacing:.05em}
+      .node-title{font:700 20px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#0f172a}
+      .node-sub{font:500 13px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#64748b}
+      .node-light{font:700 20px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#fff}
+      .sub-light{font:500 13px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#ccfbf1}
+      .edge{font:600 12px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#475569;letter-spacing:.02em}
+      .pill{font:700 12px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#0f766e}
+      .reason{font:650 14px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#334155}
+      @media (prefers-color-scheme:dark){
+        #surface{fill:#0b1220}.title,.node-title{fill:#f8fafc}.subtitle,.node-sub{fill:#94a3b8}.reason{fill:#cbd5e1}.edge{fill:#94a3b8}
+        .neutral{fill:#111c2d;stroke:#334155}.reason-box{fill:#101b2a;stroke:#334155}.rollout{fill:#172033;stroke:#475569}
+      }
+    </style>
+  </defs>
+
+  <rect id="surface" width="1200" height="560" rx="28" fill="url(#bg)"/>
+  <text class="title" x="56" y="55">Why Codex Mobile works</text>
+  <text class="subtitle" x="56" y="82">ONE DESKTOP WRITER · APPROVED CONTROL TOOLS · READ-ONLY HISTORY RECOVERY</text>
+
+  <g filter="url(#shadow)">
+    <rect class="neutral" x="56" y="142" width="210" height="154" rx="22" fill="#fff" stroke="#dbe4ee"/>
+    <rect x="78" y="164" width="42" height="42" rx="12" fill="#e0f2fe"/>
+    <path d="M91 172h16a5 5 0 0 1 5 5v18a5 5 0 0 1-5 5H91a5 5 0 0 1-5-5v-18a5 5 0 0 1 5-5zm3 23h10" fill="none" stroke="#0369a1" stroke-width="3" stroke-linecap="round"/>
+    <text class="node-title" x="78" y="237">Phone browser</text>
+    <text class="node-sub" x="78" y="263">Android · HarmonyOS · iOS</text>
+    <text class="node-sub" x="78" y="282">No Codex credentials stored</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="360" y="132" width="240" height="174" rx="24" fill="url(#bridge)"/>
+    <circle cx="392" cy="168" r="16" fill="#5eead4" opacity=".25"/>
+    <path d="M383 168h18m-9-9v18" stroke="#ccfbf1" stroke-width="3" stroke-linecap="round"/>
+    <text class="node-light" x="384" y="220">Mobile bridge</text>
+    <text class="sub-light" x="384" y="246">Loopback Node.js service</text>
+    <text class="sub-light" x="384" y="268">Auth · cache · uploads · UI</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="694" y="132" width="238" height="174" rx="24" fill="url(#desktop)"/>
+    <rect x="718" y="154" width="38" height="30" rx="5" fill="none" stroke="#dbeafe" stroke-width="3"/>
+    <path d="M729 191h16" stroke="#dbeafe" stroke-width="3" stroke-linecap="round"/>
+    <text class="node-light" x="718" y="220">Codex Desktop</text>
+    <text x="718" y="247" font-family="ui-sans-serif,system-ui" font-size="13" font-weight="700" fill="#dbeafe">SOLE TASK WRITER</text>
+    <text x="718" y="270" font-family="ui-sans-serif,system-ui" font-size="13" font-weight="500" fill="#dbeafe">Owns sessions and credentials</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect class="neutral" x="1010" y="142" width="142" height="154" rx="22" fill="#fff" stroke="#dbe4ee"/>
+    <ellipse cx="1081" cy="173" rx="26" ry="9" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+    <path d="M1055 173v31c0 5 12 9 26 9s26-4 26-9v-31m-52 15c0 5 12 9 26 9s26-4 26-9" fill="none" stroke="#7c3aed" stroke-width="2"/>
+    <text class="node-title" x="1033" y="244" font-size="17">Private</text>
+    <text class="node-title" x="1033" y="265" font-size="17">App Server</text>
+    <text class="node-sub" x="1033" y="284">Desktop-owned</text>
+  </g>
+
+  <path d="M266 216H360" fill="none" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+  <rect x="274" y="180" width="78" height="24" rx="12" fill="#fff" stroke="#cbd5e1"/>
+  <text class="edge" x="313" y="196" text-anchor="middle">HTTPS</text>
+
+  <path d="M600 216H694" fill="none" stroke="#0f766e" stroke-width="4" marker-end="url(#arrow-green)"/>
+  <rect x="607" y="171" width="82" height="34" rx="17" fill="#ecfdf5" stroke="#6ee7b7"/>
+  <text class="pill" x="648" y="186" text-anchor="middle">codex_app</text>
+  <text class="pill" x="648" y="199" text-anchor="middle" font-size="10">approved tools</text>
+
+  <path d="M932 216H1010" fill="none" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+  <text class="edge" x="971" y="198" text-anchor="middle">private IPC</text>
+
+  <g>
+    <rect class="rollout" x="395" y="352" width="170" height="76" rx="18" fill="#fff" stroke="#cbd5e1" stroke-dasharray="5 5"/>
+    <path d="M420 372h32m-32 12h48m-48 12h39" stroke="#64748b" stroke-width="3" stroke-linecap="round"/>
+    <text class="node-sub" x="480" y="374">Local rollout</text>
+    <text class="node-sub" x="480" y="394">JSONL history</text>
+    <text class="pill" x="480" y="414">READ ONLY</text>
+    <path d="M480 352V309" fill="none" stroke="#0f766e" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#arrow-green)"/>
+  </g>
+
+  <g>
+    <rect class="reason-box" x="56" y="466" width="1096" height="58" rx="18" fill="#fff" stroke="#dbe4ee"/>
+    <circle cx="88" cy="495" r="13" fill="#dcfce7"/><path d="m82 495 4 4 8-9" fill="none" stroke="#15803d" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text class="reason" x="112" y="500">No writer conflict</text>
+    <circle cx="332" cy="495" r="13" fill="#dbeafe"/><path d="M326 495h12m-6-6v12" stroke="#1d4ed8" stroke-width="2.5" stroke-linecap="round"/>
+    <text class="reason" x="356" y="500">No direct App Server exposure</text>
+    <circle cx="650" cy="495" r="13" fill="#ccfbf1"/><path d="M644 495h12" stroke="#0f766e" stroke-width="2.5" stroke-linecap="round"/>
+    <text class="reason" x="674" y="500">Version-adaptive tool catalog</text>
+    <circle cx="942" cy="495" r="13" fill="#f3e8ff"/><path d="M937 495h10m-5-5v10" stroke="#7e22ce" stroke-width="2.5" stroke-linecap="round"/>
+    <text class="reason" x="966" y="500">Long-session recovery</text>
+  </g>
+</svg>
