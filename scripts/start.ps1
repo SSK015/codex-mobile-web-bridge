@@ -6,7 +6,11 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $node = Get-Command node -ErrorAction Stop
 
-if (-not $env:CODEX_MOBILE_APP_SERVER_URL) {
+if (-not $env:CODEX_MOBILE_DESKTOP_CONTROL -and -not $env:CODEX_MOBILE_APP_SERVER_URL) {
+    $env:CODEX_MOBILE_DESKTOP_CONTROL = '1'
+}
+
+if (-not $env:CODEX_MOBILE_APP_SERVER_URL -and $env:CODEX_MOBILE_DESKTOP_CONTROL -ne '1') {
     $codex = if ($env:CODEX_MOBILE_CODEX_PATH) {
         Get-Item -LiteralPath $env:CODEX_MOBILE_CODEX_PATH
     } else {

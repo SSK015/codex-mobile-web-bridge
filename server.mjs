@@ -18,7 +18,8 @@ const CODEX_PATH = process.env.CODEX_MOBILE_CODEX_PATH || (process.platform === 
 const APP_SERVER_URL = process.env.CODEX_MOBILE_APP_SERVER_URL || '';
 const RPC_MUX_LISTEN_URL = process.env.CODEX_MOBILE_RPC_MUX_LISTEN_URL || '';
 const DESKTOP_CONTROL_MODE = process.env.CODEX_MOBILE_DESKTOP_CONTROL === '1';
-const DESKTOP_CONTROL_THREAD_ID = String(process.env.CODEX_MOBILE_CONTROL_THREAD_ID || '').trim();
+const DESKTOP_CONTROL_THREAD_ID = String(process.env.CODEX_MOBILE_CONTROL_THREAD_ID || '').trim()
+  || discoverControlThreadId();
 const HOST = process.env.CODEX_MOBILE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CODEX_MOBILE_PORT || 4780);
 const SECRET_FILE = process.env.CODEX_MOBILE_SECRET_FILE || '';
@@ -913,6 +914,25 @@ function execFileResult(command, args) {
       else resolve(stdout);
     });
   });
+}
+
+function discoverControlThreadId() {
+  if (process.env.CODEX_MOBILE_DESKTOP_CONTROL !== '1') return '';
+  const home = process.env.CODEX_HOME
+    || path.join(process.env.USERPROFILE || process.env.HOME || '', '.codex');
+  const indexPath = path.join(home, 'session_index.jsonl');
+  try {
+    const lines = fs.readFileSync(indexPath, 'utf8').split(/\r?\n/).filter(Boolean).reverse();
+    for (const line of lines) {
+      let value;
+      try { value = JSON.parse(line); } catch { continue; }
+      const id = String(value?.id || '');
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) return id;
+    }
+  } catch {
+    // The explicit environment override remains available for unusual layouts.
+  }
+  return '';
 }
 
 async function receiveUpload(request, threadId) {

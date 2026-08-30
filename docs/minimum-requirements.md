@@ -74,35 +74,37 @@ CODEX_MOBILE_COOKIE_PATH=/codex-mobile/
 A VPS and public domain are one possible implementation, not a project
 requirement. The project does not provide or operate a relay service.
 
-## Recommended default: desktop and phone share one App Server connection
+## Recommended default: Desktop remains the sole writer
 
-This is required for the complete experience demonstrated by this project.
-Private stdio remains available only as a portable fallback.
+The verified Windows deployment uses Codex Desktop's native `codex_app` tools
+pipe. Start Codex Desktop normally, then launch the bridge with:
 
-Single-connection shared mode additionally requires:
-
-- a Codex App Server listening on a loopback WebSocket; and
-- a second loopback port for the RPC multiplexer; and
-- Codex Desktop configured to use the multiplexer rather than the upstream App
-  Server directly.
-
-Set both bridge variables, for example:
-
-```shell
-CODEX_MOBILE_APP_SERVER_URL=ws://127.0.0.1:4512 \
-CODEX_MOBILE_RPC_MUX_LISTEN_URL=ws://127.0.0.1:4513 \
-node server.mjs
+```powershell
+$env:CODEX_MOBILE_DESKTOP_CONTROL = '1'
+.\scripts\start.ps1
 ```
 
-Desktop must connect to `ws://127.0.0.1:4513`. Pointing Desktop and the bridge
-at `4512` as two independent WebSocket clients does not share writer ownership.
+The Windows start script selects Desktop-control mode by default when no legacy
+App Server URL is configured. The bridge discovers a valid local task context
+from the user's Codex session index and discovers the native tools pipe owned by
+the packaged Desktop process.
 
-Shared desktop/mobile operation is experimental and version-dependent. The
-repository does not patch or redistribute Codex Desktop.
+This mode requires:
 
-Without shared mode, the phone cannot reliably observe, steer, interrupt, or
-answer requests for a turn owned by the desktop's separate App Server. Both
-clients can also compete for the same task's persisted state.
+- Windows with the verified or compatibility-tested Codex Desktop build;
+- Codex Desktop running and authenticated for the same OS user;
+- at least one existing local Codex task to provide control-call context; and
+- the native `codex_app` catalog containing `list_threads`, `read_thread`, and
+  `send_message_to_thread`.
+
+Desktop control currently supports live task reads, running-turn append, soft
+stop messages, project discovery, task creation, model selection, uploads, and
+artifact preview. It does not expose hard `turn/interrupt` or Desktop approval
+responses.
+
+The legacy RPC multiplexer is not a fallback. Current Desktop builds can reject
+or destabilize shared-writer cutovers. See the architecture document and update
+checklist before testing another Codex version.
 
 ## Resource footprint
 

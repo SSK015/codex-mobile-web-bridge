@@ -1,7 +1,9 @@
-# Single-connection shared mode
+# Legacy single-connection shared mode
 
-Single-connection shared mode is the intended default product experience.
-Private stdio exists as a compatibility and diagnostic fallback.
+> [!WARNING]
+> This is a retained protocol experiment, not the recommended deployment.
+> Current production uses Desktop's native `codex_app` tools pipe with Desktop
+> as the sole writer. Do not use this topology as an automatic fallback.
 
 ## Why a multiplexer is required
 

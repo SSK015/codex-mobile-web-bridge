@@ -12,6 +12,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const serverPath = path.join(root, 'server.mjs');
 const threadId = 'desktop-control-test-thread';
 const turnId = 'desktop-control-test-turn';
+const controlThreadId = '00000000-0000-7000-8000-000000000001';
 
 function pipePath() {
   return process.platform === 'win32'
@@ -109,7 +110,7 @@ function toolResult(request) {
   calls.push({ tool, args, namespace, contextThreadId });
   assert.equal(namespace, 'codex_app');
   if (tool === 'list_threads') {
-    assert.equal(contextThreadId, 'control-thread');
+    assert.equal(contextThreadId, controlThreadId);
     return {
       pinnedThreads: [],
       threads: [{ id: threadId, title: 'Desktop controlled task', cwd: root, status: 'idle', updatedAt: 1 }],
@@ -162,6 +163,9 @@ const mock = net.createServer((socket) => {
 await listen(mock, mockPipe);
 
 const uploadRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-mobile-desktop-control-'));
+const codexHome = path.join(uploadRoot, 'codex-home');
+await fs.mkdir(codexHome, { recursive: true });
+await fs.writeFile(path.join(codexHome, 'session_index.jsonl'), `${JSON.stringify({ id: controlThreadId })}\n`);
 const bridgePort = await freePort();
 const bridgeBaseUrl = `http://127.0.0.1:${bridgePort}`;
 const childEnv = { ...process.env };
@@ -171,11 +175,13 @@ for (const key of [
   'CODEX_MOBILE_RPC_MUX_LISTEN_URL',
   'CODEX_MOBILE_SEEN_FILE',
   'CODEX_MOBILE_THREAD_LIST_CACHE_FILE',
+  'CODEX_MOBILE_CONTROL_THREAD_ID',
+  'CODEX_HOME',
 ]) delete childEnv[key];
 Object.assign(childEnv, {
   CODEX_MOBILE_DESKTOP_CONTROL: '1',
   CODEX_MOBILE_APP_TOOLS_PIPE: mockPipe,
-  CODEX_MOBILE_CONTROL_THREAD_ID: 'control-thread',
+  CODEX_HOME: codexHome,
   CODEX_MOBILE_HOST: '127.0.0.1',
   CODEX_MOBILE_PORT: String(bridgePort),
   CODEX_MOBILE_CODEX_PATH: path.join(uploadRoot, 'MUST-NOT-SPAWN-CODEX'),

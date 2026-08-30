@@ -18,9 +18,9 @@ The bridge does not connect a second writer to Desktop tasks. Desktop remains
 the owner of every live task; mobile reads and writes are proxied through the
 native `codex_app` control channel.
 
-Use a phone browser to open local Codex tasks, steer running turns, inspect
-sanitized tool activity, answer approvals, upload files, and preview generated
-artifacts without streaming the desktop.
+Use a phone browser to open local Codex tasks, append to running turns, inspect
+sanitized tool activity, upload files, and preview generated artifacts without
+streaming the desktop.
 
 > [!WARNING]
 > This project uses experimental Codex App Server messages. It is not an
@@ -31,8 +31,8 @@ artifacts without streaming the desktop.
 - Fast task list with running, unread-complete, and empty states
 - Recent-history-first rendering and paginated older turns
 - Streaming replies and collapsed live tool previews
-- Steering and interruption of active turns
-- Command, file-change, permission, user-input, and MCP request handling
+- Running-turn append and soft stop requests
+- Collapsed command, file-change, and tool activity previews
 - Authenticated image viewing and local artifact preview/download
 - Phone file upload and clipboard-image upload with progress and deduplication
 - Browser Back/edge-swipe navigation
@@ -58,7 +58,7 @@ For phone access, choose one level:
 |---|---|
 | Same trusted Wi-Fi | Bind to the LAN interface and allow the port in the computer firewall |
 | Access from anywhere | Provide one authenticated HTTPS route to the loopback bridge |
-| Full desktop/mobile experience | One App Server connection shared through the loopback RPC multiplexer; this is the recommended default |
+| Full desktop/mobile experience | Windows Codex Desktop running normally; the bridge uses its native `codex_app` tools pipe |
 
 See [minimum deployment requirements](docs/minimum-requirements.md) for exact
 commands, security boundaries, and what remains experimental.
@@ -87,24 +87,23 @@ chmod +x scripts/start.sh
 Open `http://127.0.0.1:4780`. The first start creates a random bridge password
 inside the private state directory printed by the script.
 
-The only runtime package is the widely used `ws` WebSocket implementation. It
-provides the loopback WebSocket endpoint used by single-connection shared mode.
+The only runtime package is the widely used `ws` WebSocket implementation,
+retained for legacy App Server compatibility modes.
 
 ## Deploy with another coding agent
 
 An agent can deploy this project, but it must treat the Codex process and task
 history as user-owned state. Give the agent this instruction:
 
-> Deploy this repository by following `docs/agent-deployment.md`. Prefer one
-> single-connection shared mode through the loopback RPC multiplexer when the
-> installed Codex version supports it. Do
-> not copy, replace, patch, stop, or redistribute Codex binaries, and do not
+> Deploy this repository by following `docs/agent-deployment.md`. On verified
+> Windows builds, prefer Desktop-control mode through the native `codex_app`
+> tools pipe. Keep Codex Desktop as the sole writer. Do not copy, replace,
+> patch, stop, or redistribute Codex binaries, and do not
 > interrupt existing Codex tasks. Keep the bridge and App Server on loopback,
 > create a fresh private state directory and password, run all checks, and
 > report the exact access URL, connection mode, persistence method, and
 > verification results. Do not expose the bridge directly to the public
-> internet. If shared mode cannot be verified, stop and explain the limitation
-> before using private stdio fallback.
+> internet. Do not enable the legacy RPC-multiplexer topology as a fallback.
 
 The complete [agent deployment runbook](docs/agent-deployment.md) defines
 preflight checks, safe startup order, remote-access boundaries, acceptance
@@ -245,9 +244,8 @@ Before accepting a Codex Desktop update, follow the
 known-good version and tool catalog, verifies idle and active-turn messaging,
 checks long-history recovery, and defines a Desktop-safe rollback boundary.
 
-Private stdio should not be described as the normal user experience.
-Single-connection shared mode is the product path; private stdio remains a
-diagnostic and compatibility fallback.
+Desktop control is the verified product path on Windows. Private stdio remains
+a diagnostic fallback, and the RPC multiplexer remains a legacy experiment.
 
 ## Project status and license
 

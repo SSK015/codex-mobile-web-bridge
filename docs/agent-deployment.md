@@ -12,7 +12,7 @@ The deploying agent must:
 1. preserve all running Codex tasks and existing user changes;
 2. never copy, patch, replace, commit, upload, or redistribute a Codex binary;
 3. keep the Codex App Server and this bridge on loopback by default;
-4. prefer verified shared mode and describe private stdio only as a fallback;
+4. prefer verified Windows Desktop-control mode and keep Desktop as sole writer;
 5. create credentials in a private state directory, never in the repository;
 6. ask before changing firewall, DNS, TLS, VPN, service, or public-host state;
 7. redact secrets, task text, local paths, task IDs, and public endpoints from
@@ -27,7 +27,7 @@ Record, without printing secrets:
 - Node.js version (must be 22 or later);
 - installed Codex and Codex CLI versions;
 - whether Codex authentication already works for the current OS user;
-- whether a loopback shared App Server already exists;
+- whether the packaged Codex Desktop process and native app-tools pipe exist;
 - proposed bridge port and whether it is free; and
 - the requested phone access boundary: same trusted LAN, private overlay, or
   authenticated HTTPS reverse proxy.
@@ -45,39 +45,21 @@ If a check fails, diagnose it before starting a long-lived process.
 
 ## 2. Select the connection mode
 
-### Single-connection shared mode (preferred)
+### Desktop-control mode (preferred on verified Windows builds)
 
-Use shared mode only when a loopback App Server endpoint has been supplied or
-independently verified. Never guess an undocumented Desktop flag and never
-restart a running Desktop or App Server merely to force sharing. A controlled
-Desktop restart is required to move it from a direct connection to the
-multiplexer; do that only after the user approves the cutover and all turns are
-idle.
-
-Set the verified upstream endpoint and a separate loopback mux endpoint before
-starting the bridge:
+Start Codex Desktop normally. Do not inject transport configuration or restart
+its private App Server. The Windows start script enables Desktop-control mode
+when no legacy App Server URL is configured:
 
 ```powershell
-$env:CODEX_MOBILE_APP_SERVER_URL = 'ws://127.0.0.1:4512'
-$env:CODEX_MOBILE_RPC_MUX_LISTEN_URL = 'ws://127.0.0.1:4513'
+$env:CODEX_MOBILE_DESKTOP_CONTROL = '1'
 .\scripts\start.ps1
 ```
 
-```shell
-export CODEX_MOBILE_APP_SERVER_URL=ws://127.0.0.1:4512
-export CODEX_MOBILE_RPC_MUX_LISTEN_URL=ws://127.0.0.1:4513
-./scripts/start.sh
-```
-
-The exact ports are examples, not protocol defaults. Start order matters:
-
-1. start the upstream App Server on `4512`;
-2. start the bridge and verify that the mux listens on `4513`;
-3. start Desktop configured to use `4513`, not `4512`;
-4. verify `/api/status` reports `rpc-mux` and `rpcMux.ready: true`.
-
-Confirm that only the mux owns an established connection to the upstream App
-Server and that Desktop connects to the mux. See [shared mode](shared-mode.md).
+Verify `/api/status` reports `desktop-control`. The bridge discovers the native
+pipe and a valid local task context automatically. If discovery fails, stop and
+report the installed Desktop version and redacted process shape; do not fall
+back to a shared App Server cutover.
 
 ### Private stdio fallback
 
@@ -134,8 +116,7 @@ Whichever mechanism is chosen must:
 - use an absolute repository or installed-release path;
 - use an absolute private state directory;
 - restart only the bridge it owns;
-- never treat a Codex Desktop/App Server process as its disposable child unless
-  the user explicitly selected a managed shared topology; and
+- never treat a Codex Desktop/App Server process as its disposable child; and
 - preserve the password and upload directory with user-only permissions.
 
 ## 5. Acceptance tests
@@ -144,8 +125,8 @@ Verify all applicable items without sending a real task unless the user asks:
 
 1. unauthenticated API access is rejected;
 2. login succeeds with the generated password;
-3. `/api/status` reports ready and the intended transport (`rpc-mux` for
-   single-connection shared mode, `stdio` for fallback);
+3. `/api/status` reports ready and the intended transport (`desktop-control`
+   for the verified path, `stdio` only for an accepted diagnostic fallback);
 4. the recent task list appears;
 5. a long task opens at recent history and older history can be paged;
 6. the jump-to-latest button appears after scrolling upward and returns to the
@@ -154,10 +135,10 @@ Verify all applicable items without sending a real task unless the user asks:
 8. image and artifact routes require authentication; and
 9. the App Server remains loopback-only and existing Codex tasks remain alive.
 
-For shared mode, additionally verify that a Desktop-started harmless test task
-can receive a phone-started turn without `active writer` or `thread not found`,
-and that the resulting live events appear in both clients. Perform that test
-only with the user's approval because it creates and changes a real task.
+For Desktop-control mode, additionally verify that a Desktop-started harmless
+test task receives a phone message and an active-turn append without `active
+writer` or `thread not found`. Confirm soft stop is labeled as a message request,
+not a hard interrupt. Perform write tests only with user approval.
 
 ## 6. Required handoff
 
@@ -166,7 +147,7 @@ Report:
 - repository revision;
 - OS, Node.js, Codex Desktop, and CLI versions;
 - bridge URL and phone URL;
-- `single-connection shared` or `private stdio fallback`, with evidence;
+- `desktop-control` or `private stdio diagnostic fallback`, with evidence;
 - state directory (but never its password contents);
 - startup/persistence mechanism and how to stop only the bridge;
 - checks and acceptance tests performed;
@@ -174,6 +155,7 @@ Report:
 - known compatibility limitations; and
 - rollback instructions.
 
-Do not declare success merely because the HTML page loads. A successful shared
-deployment must prove that Desktop and phone use the same upstream connection,
-not merely the same App Server process.
+Do not declare success merely because the HTML page loads. A successful
+Desktop-control deployment must prove that Desktop remains usable as the sole
+writer and that a disposable task can be read and continued through the native
+tool channel.
