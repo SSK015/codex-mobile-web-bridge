@@ -251,6 +251,8 @@ try {
     JSON.stringify(body).includes('DESKTOP_CONTROL_SERVER_OK')
   ));
   assert.match(JSON.stringify(finalThread), /DESKTOP_CONTROL_SERVER_OK/);
+  const reconciled = await waitFor(bridgeBaseUrl, '/api/status', (body) => body.activeTurnId === null);
+  assert.equal(reconciled.activeTurnId, null, 'completed Desktop-control history clears stale active turn state');
   omitCompletedItems = true;
   await delay(250);
   const refreshedThread = await requestJson(`${bridgeBaseUrl}/api/threads/${threadId}`);

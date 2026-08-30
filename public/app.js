@@ -1,5 +1,42 @@
 const $ = (selector) => document.querySelector(selector);
 
+const THEME_STORAGE_KEY = 'codex-mobile-theme';
+const themeMedia = typeof window.matchMedia === 'function'
+  ? window.matchMedia('(prefers-color-scheme: dark)')
+  : { matches: true, addEventListener() {} };
+
+function readThemePreference() {
+  try {
+    const saved = localStorage.getItem(THEME_STORAGE_KEY);
+    return ['system', 'light', 'dark'].includes(saved) ? saved : 'system';
+  } catch {
+    return 'system';
+  }
+}
+
+function applyTheme(preference, { persist = false } = {}) {
+  const resolved = preference === 'system' ? (themeMedia.matches ? 'dark' : 'light') : preference;
+  if (document.documentElement?.dataset) {
+    document.documentElement.dataset.theme = resolved;
+    document.documentElement.dataset.themePreference = preference;
+  }
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', resolved === 'light' ? '#f6f8fa' : '#0b0d10');
+  if (persist) {
+    try { localStorage.setItem(THEME_STORAGE_KEY, preference); } catch {}
+  }
+  const button = document.querySelector('#theme');
+  if (button) {
+    const labels = {
+      system: ['◐', 'Theme: System'],
+      light: ['☀', 'Theme: Light'],
+      dark: ['☾', 'Theme: Dark'],
+    };
+    button.textContent = labels[preference][0];
+    button.setAttribute('aria-label', labels[preference][1]);
+    button.title = labels[preference][1];
+  }
+}
+
 const state = {
   threads: [],
   activeThread: null,
@@ -52,6 +89,7 @@ const elements = {
   send: $('#send'),
   stop: $('#stop'),
   refresh: $('#refresh'),
+  theme: $('#theme'),
   back: $('#back'),
   approvals: $('#approvals'),
   turnActivity: $('#turn-activity'),
@@ -86,6 +124,16 @@ const elements = {
   turnModel: $('#turn-model'),
   turnThinking: $('#turn-thinking'),
 };
+
+applyTheme(readThemePreference());
+elements.theme.addEventListener('click', () => {
+  const order = ['system', 'light', 'dark'];
+  const current = document.documentElement.dataset.themePreference || 'system';
+  applyTheme(order[(order.indexOf(current) + 1) % order.length], { persist: true });
+});
+themeMedia.addEventListener('change', () => {
+  if (document.documentElement.dataset.themePreference === 'system') applyTheme('system');
+});
 
 initializeNavigation();
 boot();
@@ -1480,12 +1528,39 @@ function addLoading() {
 function connectEvents() {
   state.eventSource?.close();
   state.eventSource = new EventSource('events');
-  state.eventSource.onopen = () => setOnline(true);
+  state.eventSource.onopen = () => {
+    setOnline(true);
+    reconcileBusyStateAfterReconnect().catch(() => {});
+  };
   state.eventSource.onerror = () => setOnline(false);
   state.eventSource.onmessage = (event) => {
     const data = JSON.parse(event.data);
     handleEvent(data);
   };
+}
+
+async function reconcileBusyStateAfterReconnect() {
+  const threadId = state.activeThread?.id;
+  if (!threadId || !state.activeTurnId || state.activeTurnThreadId !== threadId) return;
+  const requestId = state.threadOpenRequest;
+  const result = await api(`api/threads/${encodeURIComponent(threadId)}/resume`, {
+    method: 'POST',
+    body: {},
+  });
+  if (requestId !== state.threadOpenRequest || state.activeThread?.id !== threadId) return;
+  const nextTurnId = result.activeTurnId || null;
+  state.activeTurnId = nextTurnId;
+  state.activeTurnThreadId = nextTurnId ? threadId : null;
+  state.turnActivityPhase = nextTurnId ? 'thinking' : null;
+  if (!nextTurnId) {
+    state.turnLifecycleGeneration += 1;
+    state.streaming.clear();
+    state.liveToolGroups.clear();
+    state.deferredThreadSnapshot = null;
+    state.activeThread = result.thread;
+    renderThread(result.thread);
+  }
+  syncComposerState();
 }
 
 function handleEvent(event) {

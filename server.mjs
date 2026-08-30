@@ -480,8 +480,12 @@ async function route(request, response) {
         throw error;
       }
       activeThreadId = threadId;
-      activeTurnId = findInProgressTurnId(responseThread) || ((result.thread.status?.type || result.thread.status) === 'active' ? true : null);
-      activeTurnThreadId = activeTurnId ? threadId : null;
+      if (DESKTOP_CONTROL_MODE) {
+        reconcileDesktopControlActiveTurn(threadId, responseThread);
+      } else {
+        activeTurnId = findInProgressTurnId(responseThread) || ((result.thread.status?.type || result.thread.status) === 'active' ? true : null);
+        activeTurnThreadId = activeTurnId ? threadId : null;
+      }
       upsertThreadListEntry(result.thread);
       markThreadSeen(threadId, result.thread.updatedAt);
       const threadIsActive = (result.thread.status?.type || result.thread.status) === 'active';
@@ -687,6 +691,19 @@ async function route(request, response) {
         throw error;
       }
       const input = buildTurnInput(text, attachments);
+      if (DESKTOP_CONTROL_MODE) {
+        try {
+          const current = await appServer.readThread(threadId);
+          reconcileDesktopControlActiveTurn(threadId, current.thread, { broadcastCompletion: true });
+        } catch (error) {
+          if (isThreadNotFound(error)) {
+            evictThreadData(threadId);
+            error.statusCode = 404;
+            throw error;
+          }
+          throw error;
+        }
+      }
       if (activeTurnId && activeTurnThreadId === threadId) {
         let result;
         try {
@@ -1339,9 +1356,12 @@ function scheduleRecentThreadHistory(metadata, { force = false } = {}) {
       await prepareThreadImages(thread);
       if ((threadHistoryEvictionGenerations.get(threadId) || 0) !== evictionGeneration) return;
       setCachedThread(threadId, thread);
-      if (activeThreadId === threadId && activeTurnId === true) {
-        activeTurnId = findInProgressTurnId(thread) || activeTurnId;
-        activeTurnThreadId = threadId;
+      if (activeThreadId === threadId) {
+        if (DESKTOP_CONTROL_MODE) reconcileDesktopControlActiveTurn(threadId, thread, { broadcastCompletion: true });
+        else if (activeTurnId === true) {
+          activeTurnId = findInProgressTurnId(thread) || activeTurnId;
+          activeTurnThreadId = threadId;
+        }
       }
       broadcast({ type: 'threadSnapshot', thread: publicThread(thread) });
     } catch (error) {
@@ -1948,6 +1968,35 @@ function findInProgressTurnId(thread) {
   const turns = Array.isArray(thread?.turns) ? thread.turns : [];
   const active = [...turns].reverse().find((turn) => /progress|running|started/i.test(String(turn?.status?.type || turn?.status || '')));
   return active?.id || null;
+}
+
+function reconcileDesktopControlActiveTurn(threadId, thread, { broadcastCompletion = false } = {}) {
+  if (!DESKTOP_CONTROL_MODE || !threadId || activeThreadId !== threadId) return activeTurnId;
+  const inProgressTurnId = findInProgressTurnId(thread);
+  if (inProgressTurnId) {
+    activeTurnId = inProgressTurnId;
+    activeTurnThreadId = threadId;
+    return activeTurnId;
+  }
+  const previous = activeTurnId;
+  const previousThreadId = activeTurnThreadId;
+  activeTurnId = null;
+  activeTurnThreadId = null;
+  if (broadcastCompletion && previous && (!previousThreadId || previousThreadId === threadId)) {
+    const completedTurnId = previous === true ? null : String(previous);
+    if (completedTurnId) lastCompletedTurnId = completedTurnId;
+    broadcast({
+      type: 'notification',
+      method: 'turn/completed',
+      params: {
+        threadId,
+        turnId: completedTurnId,
+        turn: completedTurnId ? { id: completedTurnId, status: 'completed' } : null,
+      },
+      sequence: ++appServerEventSequence,
+    });
+  }
+  return null;
 }
 
 function loadThreadListCache() {

@@ -4,13 +4,10 @@ An unofficial mobile web client for Codex Desktop running on your own computer.
 
 ![Codex Mobile architecture](assets/architecture.svg)
 
-The bridge does not connect a second writer to Desktop tasks. Desktop remains
-the owner of every live task; mobile reads and writes are proxied through the
-native `codex_app` control channel.
+Codex-WebBridge lets a phone control Codex through the existing Desktop app,
+without adding a second task writer.
 
-Use a phone browser to open local Codex tasks, append to running turns, inspect
-sanitized tool activity, upload files, and preview generated artifacts without
-streaming the desktop.
+![Cross-device Codex task continuity through Codex-WebBridge](assets/hero-continuity.gif)
 
 > [!WARNING]
 > This project uses experimental Codex App Server messages. It is not an

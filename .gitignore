@@ -22,6 +22,11 @@
 
 !/public/
 !/public/**
+!/assets/
+!/assets/architecture.svg
+!/assets/demo-conversation.png
+!/assets/demo-task-list.png
+!/assets/hero-continuity.gif
 !/scripts/
 !/scripts/**
 !/docs/
