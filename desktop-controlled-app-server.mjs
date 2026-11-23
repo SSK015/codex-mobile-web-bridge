@@ -13,6 +13,9 @@ function controlledError(message, code, statusCode) {
 function unwrap(value) {
   if (!value || typeof value !== 'object' || !Array.isArray(value.contentItems)) return value;
   const item = value.contentItems.find((candidate) => candidate?.type === 'inputText');
+  if (/^(?:Tool response exceeds the size limit\.|Thread history exceeds the read size limit\.)/.test(item?.text || '')) {
+    throw controlledError('会话记录超过桌面接口的大小限制', 'DESKTOP_TOOL_RESPONSE_TOO_LARGE', 502);
+  }
   if (value.success === false) {
     throw controlledError(
       item?.text || 'Desktop control tool call failed',
@@ -86,6 +89,9 @@ export class DesktopControlledAppServer extends EventEmitter {
     startTimeoutMs = 20_000,
     completionTimeoutMs = 24 * 60 * 60 * 1_000,
     readTurnLimit = 10,
+    reconnectDelayMs = 1_000,
+    maxReconnectDelayMs = 15_000,
+    healthIntervalMs = 15_000,
   } = {}) {
     super();
     if (!client && typeof clientFactory !== 'function') {
@@ -98,6 +104,19 @@ export class DesktopControlledAppServer extends EventEmitter {
     this.completionTimeoutMs = completionTimeoutMs;
     this.readTurnLimit = readTurnLimit;
     this.ready = false;
+    this.reconnectDelayMs = reconnectDelayMs;
+    this.maxReconnectDelayMs = maxReconnectDelayMs;
+    this.healthIntervalMs = healthIntervalMs;
+    this.connectionTimer = null;
+    this.connectionAttempt = null;
+    this.connectionGeneration = 0;
+    this.connectionFailures = 0;
+    this.observedClient = null;
+    this.onClientDisconnect = (error) => {
+      if (this.stopping) return;
+      this.#markDisconnected(error);
+      this.#scheduleConnectionCheck(this.reconnectDelayMs);
+    };
     this.serverRequests = new Map();
     this.stopping = false;
     this.pollers = new Map();
@@ -106,18 +125,30 @@ export class DesktopControlledAppServer extends EventEmitter {
     });
   }
 
-  async start() {
+  async start({ waitForReady = true } = {}) {
     if (this.ready) return;
     if (!this.client) this.client = this.clientFactory();
     this.stopping = false;
-    await this.client.connect();
-    this.ready = true;
-    this.emit('ready');
+    if (this.observedClient !== this.client) {
+      this.observedClient?.off?.('disconnected', this.onClientDisconnect);
+      this.observedClient = this.client;
+      this.client.on?.('disconnected', this.onClientDisconnect);
+    }
+    // Keep the web UI available while Desktop is temporarily unavailable.
+    // Only the read-only handshake is retried, never a submitted tool call.
+    const attempt = this.#checkConnection();
+    if (waitForReady) await attempt;
   }
 
   async stop() {
     this.stopping = true;
     this.ready = false;
+    this.connectionGeneration++;
+    clearTimeout(this.connectionTimer);
+    this.connectionTimer = null;
+    this.connectionAttempt = null;
+    this.observedClient?.off?.('disconnected', this.onClientDisconnect);
+    this.observedClient = null;
     for (const [poller, resolve] of this.pollers) {
       clearTimeout(poller);
       resolve();
@@ -133,6 +164,55 @@ export class DesktopControlledAppServer extends EventEmitter {
     }
     await this.stop();
     await this.start();
+  }
+
+  #markDisconnected(error) {
+    const wasReady = this.ready;
+    this.ready = false;
+    if (wasReady) this.emit('exit', { intentional: false, reconnecting: true, code: 'DESKTOP_DISCONNECTED' });
+    if (this.listenerCount('error') && (wasReady || this.connectionFailures === 0)) this.emit('error', error);
+  }
+
+  #scheduleConnectionCheck(delay) {
+    if (this.stopping) return;
+    clearTimeout(this.connectionTimer);
+    this.connectionTimer = setTimeout(() => {
+      this.connectionTimer = null;
+      void this.#checkConnection();
+    }, delay);
+    this.connectionTimer.unref?.();
+  }
+
+  async #checkConnection() {
+    if (this.stopping) return;
+    if (this.connectionAttempt) return this.connectionAttempt;
+    const generation = this.connectionGeneration;
+    const client = this.client;
+    const attempt = (async () => {
+      try {
+        await client.connect();
+        if (this.stopping || generation !== this.connectionGeneration) return;
+        await client.checkConnection?.();
+        if (this.stopping || generation !== this.connectionGeneration) return;
+        const recovered = !this.ready;
+        this.ready = true;
+        this.connectionFailures = 0;
+        if (recovered) this.emit('ready');
+      } catch (error) {
+        if (this.stopping || generation !== this.connectionGeneration) return;
+        this.#markDisconnected(error);
+        this.connectionFailures++;
+      } finally {
+        if (!this.stopping && generation === this.connectionGeneration) {
+          this.#scheduleConnectionCheck(this.ready ? this.healthIntervalMs
+            : Math.min(this.maxReconnectDelayMs, this.reconnectDelayMs * (2 ** Math.min(this.connectionFailures, 8))));
+        }
+      }
+    })();
+    this.connectionAttempt = attempt;
+    try { await attempt; } finally {
+      if (this.connectionAttempt === attempt) this.connectionAttempt = null;
+    }
   }
 
   async listThreads({ searchTerm = null, limit = 100, cursor = null } = {}) {
@@ -162,6 +242,15 @@ export class DesktopControlledAppServer extends EventEmitter {
     return { data: Array.isArray(result) ? result : (result?.projects ?? result?.data ?? []) };
   }
 
+  async getUsageLimits() {
+    this.#assertReady();
+    const tools = await this.client.listTools();
+    if (!tools.has('get_usage_limits')) {
+      throw controlledError('当前 Codex 版本未提供额度查询接口', 'USAGE_LIMITS_UNAVAILABLE', 501);
+    }
+    return unwrap(await this.client.getUsageLimits());
+  }
+
   async listModelOptions() {
     this.#assertReady();
     const tools = await this.client.listTools();
@@ -176,11 +265,11 @@ export class DesktopControlledAppServer extends EventEmitter {
 
   async readThread(threadId, { includeTurns = true } = {}) {
     this.#assertReady();
-    const result = unwrap(await this.client.readThread({
+    const result = await this.#readHistoryPage({
       threadId,
       turnLimit: includeTurns ? Math.min(this.readTurnLimit, 10) : 1,
       includeOutputs: includeTurns,
-    }));
+    });
     const source = result?.thread ?? result ?? {};
     let turns = includeTurns ? [...(result?.turns ?? source?.turns ?? [])] : [];
     if (includeTurns && result?.page?.order === 'newest_first') turns.reverse();
@@ -197,18 +286,35 @@ export class DesktopControlledAppServer extends EventEmitter {
     if (sortDirection !== 'desc') {
       throw controlledError('Desktop control channel only supports newest-first turn pages', 'DESKTOP_CONTROL_SORT_UNSUPPORTED', 501);
     }
-    const result = unwrap(await this.client.readThread({
+    const result = await this.#readHistoryPage({
       threadId,
       ...(cursor ? { cursor: String(cursor) } : {}),
       turnLimit: Math.max(1, Math.min(Number(limit) || 10, 10)),
       includeOutputs: true,
       maxOutputCharsPerItem: 20_000,
-    }));
+    });
     const turns = await this.rolloutHistory.enrich(threadId, [...(result?.turns ?? result?.thread?.turns ?? [])]);
     return {
       data: turns,
       nextCursor: result?.page?.nextCursor ?? null,
     };
+  }
+
+  async #readHistoryPage(args) {
+    const options = { ...args };
+    while (true) {
+      try {
+        return unwrap(await this.client.readThread(options));
+      } catch (error) {
+        if (error.code !== 'DESKTOP_TOOL_RESPONSE_TOO_LARGE') throw error;
+        // Desktop returns a plain-text notice instead of JSON above 1 MiB.
+        // Retry only this read: omit command outputs first, then reduce the
+        // page size. Preserve Desktop's returned cursor for the smaller page.
+        if (options.includeOutputs) options.includeOutputs = false;
+        else if (options.turnLimit > 1) options.turnLimit = Math.max(1, Math.floor(options.turnLimit / 2));
+        else throw error;
+      }
+    }
   }
 
   async startTurn(threadId, textOrInput, options = {}) {
@@ -278,13 +384,16 @@ export class DesktopControlledAppServer extends EventEmitter {
   }
 
   #assertReady() {
-    if (!this.ready) throw controlledError('Desktop control channel is not ready', 'DESKTOP_CONTROL_NOT_READY', 503);
+    if (!this.ready || this.client?.connected === false) {
+      throw controlledError('桌面 Codex 未连接，正在自动重连；草稿已保留，请连接恢复后再发送。', 'DESKTOP_CONTROL_NOT_READY', 503);
+    }
   }
 
   async #waitForNewTurn(threadId, known) {
     const deadline = Date.now() + this.startTimeoutMs;
     while (!this.stopping && Date.now() < deadline) {
-      const result = await this.readThread(threadId, { includeTurns: true });
+      const result = await this.#readForPoll(threadId);
+      if (!result) { await this.#delay(this.pollIntervalMs); continue; }
       const turn = [...(result.thread.turns ?? [])].reverse().find((candidate) => {
         const id = turnIdOf(candidate);
         return id && !known.has(id);
@@ -300,7 +409,8 @@ export class DesktopControlledAppServer extends EventEmitter {
     const itemFingerprints = new Map();
     try {
       while (!this.stopping && Date.now() < deadline) {
-        const result = await this.readThread(threadId, { includeTurns: true });
+        const result = await this.#readForPoll(threadId);
+        if (!result) { await this.#delay(this.pollIntervalMs); continue; }
         const turn = (result.thread.turns ?? []).find((candidate) => turnIdOf(candidate) === turnId);
         for (const item of turn?.items ?? []) {
           const itemId = String(item?.id ?? '');
@@ -337,6 +447,18 @@ export class DesktopControlledAppServer extends EventEmitter {
       }, milliseconds);
       this.pollers.set(timer, resolve);
     });
+  }
+
+  async #readForPoll(threadId) {
+    if (!this.ready) return null;
+    try {
+      return await this.readThread(threadId, { includeTurns: true });
+    } catch (error) {
+      // A transport outage is not a completed or failed Desktop task. Resume
+      // observing the same turn after reconnect, without re-sending its prompt.
+      if (!this.ready || this.client?.connected === false) return null;
+      throw error;
+    }
   }
 }
 

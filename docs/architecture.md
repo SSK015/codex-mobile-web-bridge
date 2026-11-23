@@ -40,7 +40,13 @@ message because the app-tools catalog does not expose the internal hard
 
 When `read_thread` returns recent turns with empty `items`, the bridge fills
 only those missing items from the local rollout JSONL. Rollouts are never used
-to write or control a task.
+to write or control a task. On an oversized history response, the bridge first
+omits command output, then requests fewer turns. Older pages keep the cursor
+returned by Desktop.
+
+After Desktop restarts, the bridge checks the new endpoint before resuming
+reads. It does not replay prompts after an uncertain delivery. See the
+[reconnection guide](desktop-control-reconnect.md).
 
 ### Private stdio (compatibility fallback)
 

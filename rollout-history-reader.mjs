@@ -2,6 +2,26 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 const DEFAULT_INITIAL_BYTES = 8 * 1024 * 1024;
+
+// rollout 目录索引的存活时间：过期后重新扫描 sessions 树，
+// 让继续/派生线程之后新出现的 rollout 文件最终能被发现。
+const DEFAULT_INDEX_TTL_MS = 5_000;
+
+// rollout 文件名匹配规则：Codex 会为同一个线程写出多个文件 ——
+// 旧的 rollout-<时间>-<threadId>.jsonl，以及继续/派生后新开的
+// rollout-<时间>-<threadId>_<turnId>.jsonl。两种命名都要命中；线程 id 必须完整出现
+// （前面只能是非字母数字分隔符），后面只能是文件名结尾或 `_<turnId>`，
+// 这样以同一段 id 开头的其它线程不会被误认。
+function rolloutNamePattern(threadId) {
+  const escaped = String(threadId).toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[^0-9a-z])${escaped}(?:_[\\s\\S]*)?$`);
+}
+
+function rolloutNameMatchesThread(fileName, pattern) {
+  const name = String(fileName).toLowerCase();
+  return name.endsWith('.jsonl') && pattern.test(name.slice(0, -'.jsonl'.length));
+}
+
 const TOOL_TYPES = new Set([
   'commandExecution',
   'fileChange',
@@ -115,11 +135,15 @@ function messageItem(payload) {
 }
 
 export class RolloutHistoryReader {
-  constructor({ root, initialBytes = DEFAULT_INITIAL_BYTES } = {}) {
+  constructor({ root, initialBytes = DEFAULT_INITIAL_BYTES, indexTtlMs = DEFAULT_INDEX_TTL_MS } = {}) {
     this.root = root || null;
     this.initialBytes = initialBytes;
+    this.indexTtlMs = indexTtlMs;
     this.states = new Map();
-    this.paths = new Map();
+    // 共享目录索引 { at, files }：一次扫描供所有线程使用，过期后重扫。
+    this.index = null;
+    // 并发去重：同一时刻只跑一次全树扫描。
+    this.scanning = null;
   }
 
   async enrich(threadId, turns) {
@@ -255,24 +279,52 @@ export class RolloutHistoryReader {
     turn.items.push(item);
   }
 
+  // 解析线程当前的 rollout 文件：同一个线程可能有多个候选（旧文件 + 继续/派生后的新文件），
+  // 取 mtime 最新的那个；解析不到时返回 null，不抛异常。
   async #find(threadId) {
-    if (this.paths.has(threadId)) return this.paths.get(threadId);
-    const suffix = `${threadId}.jsonl`.toLowerCase();
+    const key = String(threadId);
+    const pattern = rolloutNamePattern(key);
+    let newestPath = null;
+    let newestMtime = -Infinity;
+    for (const file of await this.#rolloutFiles()) {
+      if (!rolloutNameMatchesThread(file.name, pattern)) continue;
+      let stat;
+      try { stat = await fs.stat(file.path); } catch { continue; }
+      if (stat.mtimeMs > newestMtime) {
+        newestMtime = stat.mtimeMs;
+        newestPath = file.path;
+      }
+    }
+    return newestPath;
+  }
+
+  // 目录索引：在 indexTtlMs 窗口内所有线程共用同一次扫描结果，过期后重扫。
+  // 这样既不必每次调用都遍历整棵树，又能跟上后来出现的 rollout 文件。
+  async #rolloutFiles() {
+    if (this.index && Date.now() - this.index.at < this.indexTtlMs) return this.index.files;
+    if (!this.scanning) {
+      this.scanning = this.#scanRolloutFiles().finally(() => { this.scanning = null; });
+    }
+    return this.scanning;
+  }
+
+  async #scanRolloutFiles() {
+    const files = [];
     const stack = [this.root];
     while (stack.length) {
       const directory = stack.pop();
       let entries;
       try { entries = await fs.readdir(directory, { withFileTypes: true }); } catch { continue; }
       for (const entry of entries) {
-        const candidate = path.join(directory, entry.name);
-        if (entry.isDirectory()) stack.push(candidate);
-        else if (entry.name.toLowerCase().endsWith(suffix)) {
-          this.paths.set(threadId, candidate);
-          return candidate;
+        if (entry.isDirectory()) {
+          stack.push(path.join(directory, entry.name));
+          continue;
         }
+        const name = entry.name.toLowerCase();
+        if (name.endsWith('.jsonl')) files.push({ name, path: path.join(directory, entry.name) });
       }
     }
-    this.paths.set(threadId, null);
-    return null;
+    this.index = { at: Date.now(), files };
+    return files;
   }
 }

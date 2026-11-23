@@ -22,6 +22,9 @@ class FakeDesktopClient {
   async listProjects() {
     return wrapped({ projects: [{ projectId: 'p1', name: 'Project one', isGitRepository: true }] });
   }
+  async getUsageLimits() {
+    return wrapped({ rateLimitsByLimitId: { codex: { limitId: 'codex', primary: { usedPercent: 12 } } } });
+  }
   async listTools() {
     const schema = {
       properties: {
@@ -32,6 +35,7 @@ class FakeDesktopClient {
     return new Map([
       ['create_thread', { inputSchema: schema }],
       ['send_message_to_thread', { inputSchema: schema }],
+      ['get_usage_limits', { inputSchema: { properties: {} } }],
     ]);
   }
   async createThread(args) {
@@ -76,6 +80,8 @@ assert.equal(read.thread.turns[0].id, 'old');
 
 const projects = await app.listProjects();
 assert.equal(projects.data[0].projectId, 'p1');
+const usage = await app.getUsageLimits();
+assert.equal(usage.rateLimitsByLimitId.codex.primary.usedPercent, 12);
 const modelOptions = await app.listModelOptions();
 assert.deepEqual(modelOptions.models, ['gpt-test']);
 assert.deepEqual(modelOptions.modelThinking['gpt-test'], ['low', 'high']);
@@ -134,5 +140,69 @@ const invalid = new DesktopControlledAppServer({ client: invalidClient });
 await invalid.start();
 await assert.rejects(invalid.listThreads(), (error) => error.code === 'DESKTOP_TOOL_INVALID_JSON');
 await invalid.stop();
+
+const oversizedNotice = () => ({
+  success: true,
+  contentItems: [{ type: 'inputText', text: 'Tool response exceeds the size limit. Request fewer turns or omit outputs. A single oversized turn cannot be returned by this tool.' }],
+});
+const largeClient = new FakeDesktopClient();
+const historyReads = [];
+largeClient.readThread = async (args) => {
+  historyReads.push({ ...args });
+  if (args.includeOutputs || args.turnLimit > 2) return oversizedNotice();
+  return wrapped({
+    thread: { id: args.threadId, title: 'Large history' },
+    page: { order: 'newest_first', nextCursor: 'older-small-page' },
+    turns: [{ id: 'latest', items: [{ type: 'agentMessage', text: 'Keep the answer' }] }],
+  });
+};
+const large = new DesktopControlledAppServer({ client: largeClient });
+await large.start();
+try {
+  const smallPage = await large.listTurns('large-history', { cursor: 'original-anchor', limit: 10 });
+  assert.deepEqual(historyReads.map((args) => [args.includeOutputs, args.turnLimit]), [
+    [true, 10], [false, 10], [false, 5], [false, 2],
+  ]);
+  assert.ok(historyReads.every((args) => args.cursor === 'original-anchor'), 'retry the same page anchor');
+  assert.equal(smallPage.nextCursor, 'older-small-page', 'use the cursor from the successful smaller page');
+  assert.equal(smallPage.data[0].items[0].text, 'Keep the answer');
+  historyReads.length = 0;
+  assert.equal((await large.readThread('large-history')).thread.turns.length, 1, 'snapshots use the same bounded fallback');
+  largeClient.readThread = async (args) => { historyReads.push({ ...args }); return oversizedNotice(); };
+  historyReads.length = 0;
+  await assert.rejects(large.listTurns('unreadable-history', { limit: 10 }), (error) => error.code === 'DESKTOP_TOOL_RESPONSE_TOO_LARGE');
+  assert.equal(historyReads.length, 5, 'stop after a single turn without outputs still exceeds the limit');
+  assert.equal(historyReads.at(-1).turnLimit, 1);
+  assert.equal(largeClient.sent.length, 0, 'history fallback never sends task messages');
+  const currentOversizedNotice = {
+    success: false,
+    contentItems: [{ type: 'inputText', text: 'Thread history exceeds the read size limit. Try fewer turns. A single oversized turn cannot be read by this tool.' }],
+  };
+  historyReads.length = 0;
+  largeClient.readThread = async (args) => {
+    historyReads.push({ ...args });
+    if (args.turnLimit > 1) return currentOversizedNotice;
+    return wrapped({
+      thread: { id: args.threadId },
+      page: { order: 'newest_first', nextCursor: 'current-older-page' },
+      turns: [{ id: 'current-latest', items: [] }],
+    });
+  };
+  const currentPage = await large.listTurns('current-large-history', { cursor: 'current-anchor', limit: 10 });
+  assert.deepEqual(historyReads.map((args) => [args.includeOutputs, args.turnLimit]), [
+    [true, 10], [false, 10], [false, 5], [false, 2], [false, 1],
+  ]);
+  assert.ok(historyReads.every((args) => args.cursor === 'current-anchor'));
+  assert.equal(currentPage.nextCursor, 'current-older-page');
+  assert.equal(currentPage.data[0].id, 'current-latest');
+  largeClient.readThread = async () => currentOversizedNotice;
+  await assert.rejects(large.listTurns('current-unreadable-history'), (error) => error.code === 'DESKTOP_TOOL_RESPONSE_TOO_LARGE');
+  let invalidReads = 0;
+  largeClient.readThread = async () => { invalidReads++; return { contentItems: [{ type: 'inputText', text: '{bad json' }] }; };
+  await assert.rejects(large.readThread('invalid-history'), (error) => error.code === 'DESKTOP_TOOL_INVALID_JSON');
+  assert.equal(invalidReads, 1, 'unrelated protocol failures are not retried as size limits');
+} finally {
+  await large.stop();
+}
 
 console.log('desktop controlled app server tests passed');

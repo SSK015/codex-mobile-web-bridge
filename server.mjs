@@ -33,6 +33,10 @@ const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const UPLOAD_IDLE_TIMEOUT_MS = 90 * 1000;
+function readBoundedIntEnv(name, fallback) {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
+}
 const IMAGE_TOKEN_KEY = crypto.createHash('sha256')
   .update(secret ? `codex-mobile-image-v1:${secret}` : crypto.randomBytes(32))
   .digest();
@@ -102,7 +106,7 @@ const rpcMux = RPC_MUX_LISTEN_URL
   : null;
 const createDesktopControlClient = () => new DesktopAppToolsClient({
   contextThreadId: DESKTOP_CONTROL_THREAD_ID,
-  discoverPipePath: () => discoverDesktopAppToolsPipe(),
+  discoverPipePath: (options) => discoverDesktopAppToolsPipe(options),
   requestTimeoutMs: 130_000,
 });
 const appServer = DESKTOP_CONTROL_MODE
@@ -113,6 +117,14 @@ const appServer = DESKTOP_CONTROL_MODE
       websocketUrl: rpcMux ? null : (APP_SERVER_URL || null),
       rpcTransport: rpcMux?.createInternalTransport() || null,
     });
+
+// SSE keep-alive. A proxy or tunnel on the phone's path drops a stream that
+// stays quiet, and the page only learns about a change from that stream, so
+// every connection carries a comment frame well inside any idle window.
+// Comments are not events: an EventSource ignores anything that is not `data:`,
+// so this cannot be mistaken for a state change. The env knob is the
+// test/diagnostic override; 15 s is the shipped behaviour.
+const SSE_HEARTBEAT_MS = readBoundedIntEnv('CODEX_MOBILE_SSE_HEARTBEAT_MS', 15_000);
 const sseClients = new Set();
 const threadCache = new Map();
 const threadCacheSizes = new Map();
@@ -237,6 +249,7 @@ appServer.on('serverRequest', (message) => {
   broadcast({ type: 'serverRequest', request: publicServerRequest(message) });
 });
 appServer.on('exit', (event) => broadcast({ type: 'appServerExit', event }));
+appServer.on('ready', () => broadcast({ type: 'appServerReady' }));
 appServer.on('error', (error) => broadcast({ type: 'appServerError', message: error.message }));
 rpcMux?.on('error', (error) => console.error(`RPC multiplexer error: ${error.message}`));
 rpcMux?.on('log', (message) => console.log(`RPC multiplexer: ${message}`));
@@ -249,7 +262,7 @@ appServer.on('exit', (event) => {
 
 if (rpcMux) await rpcMux.start();
 try {
-  await appServer.start();
+  await appServer.start(DESKTOP_CONTROL_MODE ? { waitForReady: false } : undefined);
 } catch (error) {
   await rpcMux?.stop();
   throw error;
@@ -310,6 +323,7 @@ async function route(request, response) {
         interruptMode: DESKTOP_CONTROL_MODE ? 'soft-message' : 'hard',
         approvals: !DESKTOP_CONTROL_MODE,
         attachments: true,
+        usageLimits: typeof appServer.getUsageLimits === 'function',
       },
       ...(rpcMux ? { rpcMux: rpcMux.stats } : {}),
     });
@@ -387,6 +401,13 @@ async function route(request, response) {
   if (request.method === 'GET' && pathname === '/api/model-options') {
     if (typeof appServer.listModelOptions !== 'function') return json(response, 200, { models: [], thinking: [] });
     return json(response, 200, await appServer.listModelOptions());
+  }
+
+  if (request.method === 'GET' && pathname === '/api/usage') {
+    if (typeof appServer.getUsageLimits !== 'function') {
+      return json(response, 501, { error: '当前连接模式不支持额度查询', code: 'USAGE_LIMITS_UNAVAILABLE' });
+    }
+    return json(response, 200, publicUsageLimits(await appServer.getUsageLimits()));
   }
 
   if (request.method === 'POST' && pathname === '/api/threads') {
@@ -515,13 +536,15 @@ async function route(request, response) {
       const cachedUsable = hasUsableCachedHistory(cached);
       const cachedFresh = cachedUsable
         && normalizeTimestamp(cached.updatedAt) >= normalizeTimestamp(result.thread.updatedAt);
+      const cachedFailed = Boolean(cached?.mobileHistoryError)
+        && normalizeTimestamp(cached.updatedAt) >= normalizeTimestamp(result.thread.updatedAt);
       thread = cachedUsable
         ? { ...cached, ...result.thread, turns: cached.turns, mobileHistoryLoading: false, mobileHistoryError: false }
-        : { ...result.thread, turns: [], mobileHistoryLoading: true };
+        : { ...result.thread, turns: [], mobileHistoryLoading: !cachedFailed, mobileHistoryError: cachedFailed };
       if (cachedUsable) await prepareThreadImages(thread);
       upsertThreadListEntry(result.thread);
       const threadIsActive = (result.thread.status?.type || result.thread.status) === 'active';
-      if (!cachedFresh || threadIsActive) {
+      if ((!cachedFresh && !cachedFailed) || threadIsActive) {
         scheduleRecentThreadHistory(result.thread, { force: threadIsActive && cachedUsable });
       }
     } catch (error) {
@@ -608,7 +631,8 @@ async function route(request, response) {
   if (request.method === 'POST' && uploadMatch) {
     const threadId = decodeURIComponent(uploadMatch[1]);
     if (threadId !== activeThreadId) {
-      const error = new Error('请先打开并接管这个 task');
+      const error = new Error('会话尚未连接，请返回列表重新打开，连接成功后再上传附件。');
+      error.publicCode = 'THREAD_NOT_OPEN';
       error.statusCode = 409;
       throw error;
     }
@@ -675,7 +699,8 @@ async function route(request, response) {
   if (request.method === 'POST' && messageMatch) {
     const threadId = decodeURIComponent(messageMatch[1]);
     if (threadId !== activeThreadId) {
-      const error = new Error('请先打开并接管这个 task');
+      const error = new Error('会话尚未连接，请返回列表重新打开，连接成功后再发送。');
+      error.publicCode = 'THREAD_NOT_OPEN';
       error.statusCode = 409;
       throw error;
     }
@@ -882,8 +907,17 @@ async function route(request, response) {
       'X-Accel-Buffering': 'no',
     });
     response.write(`data: ${JSON.stringify({ type: 'connected' })}\n\n`);
+    // The comment frame is what keeps the connection from looking idle to a
+    // proxy; it carries no event and is dropped by the page's own parser.
+    const heartbeat = setInterval(() => {
+      response.write(': ping\n\n');
+    }, SSE_HEARTBEAT_MS);
+    if (typeof heartbeat.unref === 'function') heartbeat.unref();
     sseClients.add(response);
-    request.on('close', () => sseClients.delete(response));
+    request.on('close', () => {
+      clearInterval(heartbeat);
+      sseClients.delete(response);
+    });
     return;
   }
 
@@ -1112,6 +1146,55 @@ function publicThreadSummary(thread) {
     status,
     activityState,
     isPinned: Boolean(thread.isPinned),
+  };
+}
+
+function publicUsageWindow(window) {
+  if (!window || typeof window !== 'object') return null;
+  const used = window.usedPercent == null ? NaN : Number(window.usedPercent);
+  const usedPercent = Number.isFinite(used) ? Math.max(0, Math.min(100, used)) : null;
+  const duration = Number(window.windowDurationMins);
+  const resetsAt = Number(window.resetsAt);
+  return {
+    usedPercent,
+    remainingPercent: usedPercent == null ? null : Math.max(0, 100 - usedPercent),
+    windowDurationMins: Number.isFinite(duration) && duration > 0 ? duration : null,
+    resetsAt: Number.isFinite(resetsAt) && resetsAt > 0 ? resetsAt : null,
+  };
+}
+
+function publicUsageLimits(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  const byId = source.rateLimitsByLimitId && typeof source.rateLimitsByLimitId === 'object'
+    ? Object.entries(source.rateLimitsByLimitId)
+    : source.rateLimits && typeof source.rateLimits === 'object'
+      ? [[source.rateLimits.limitId || 'codex', source.rateLimits]]
+      : [];
+  const limits = byId
+    .filter(([, limit]) => limit && typeof limit === 'object')
+    .map(([key, limit]) => ({
+      id: String(limit.limitId || key).slice(0, 128),
+      name: limit.limitName ? String(limit.limitName).slice(0, 160) : null,
+      planType: limit.planType ? String(limit.planType).slice(0, 64) : null,
+      primary: publicUsageWindow(limit.primary),
+      secondary: publicUsageWindow(limit.secondary),
+      credits: limit.credits && typeof limit.credits === 'object' ? {
+        hasCredits: Boolean(limit.credits.hasCredits),
+        unlimited: Boolean(limit.credits.unlimited),
+        balance: limit.credits.balance == null ? null : String(limit.credits.balance).slice(0, 64),
+      } : null,
+      individualLimit: limit.individualLimit == null ? null : String(limit.individualLimit).slice(0, 160),
+      spendControlReached: limit.spendControlReached == null ? null : Boolean(limit.spendControlReached),
+      rateLimitReachedType: limit.rateLimitReachedType == null ? null : String(limit.rateLimitReachedType).slice(0, 64),
+    }))
+    .sort((a, b) => (a.id === 'codex' ? -1 : b.id === 'codex' ? 1 : a.id.localeCompare(b.id)));
+  const availableCount = Number(source.rateLimitResetCredits?.availableCount);
+  return {
+    available: limits.length > 0,
+    limits,
+    resetCredits: {
+      availableCount: Number.isFinite(availableCount) && availableCount > 0 ? Math.floor(availableCount) : 0,
+    },
   };
 }
 

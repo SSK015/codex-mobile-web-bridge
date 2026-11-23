@@ -1,10 +1,11 @@
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 
 const DEFAULT_MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 20_000;
 
-export class DesktopAppToolsClient {
+export class DesktopAppToolsClient extends EventEmitter {
   constructor({
     pipePath = null,
     discoverPipePath = null,
@@ -13,6 +14,7 @@ export class DesktopAppToolsClient {
     requestTimeoutMs = DEFAULT_TIMEOUT_MS,
     maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,
   } = {}) {
+    super();
     if (!pipePath && typeof discoverPipePath !== 'function') {
       throw new TypeError('pipePath or discoverPipePath is required');
     }
@@ -28,11 +30,15 @@ export class DesktopAppToolsClient {
     this.requestTimeoutMs = requestTimeoutMs;
     this.maxFrameBytes = maxFrameBytes;
     this.socket = null;
+    this.connectingSocket = null;
+    this.socketPaths = new WeakMap();
+    this.failedPipePaths = new Set();
     this.connectPromise = null;
     this.buffer = Buffer.alloc(0);
     this.pending = new Map();
     this.nextId = 1;
     this.toolsPromise = null;
+    this.toolConnections = new WeakMap();
     this.stopped = false;
   }
 
@@ -51,30 +57,42 @@ export class DesktopAppToolsClient {
   }
 
   async #connectOnce() {
-    const path = this.fixedPipePath ?? await this.discoverPipePath();
+    const path = this.fixedPipePath ?? await this.discoverPipePath({ excludePaths: [...this.failedPipePaths] });
+    if (this.stopped) throw new Error('Desktop app tools client is stopped');
     if (typeof path !== 'string' || !path) throw new Error('Desktop app tools pipe was not found');
     const socket = net.createConnection(path);
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        socket.destroy();
-        reject(new Error('Timed out connecting to Desktop app tools pipe'));
-      }, this.connectTimeoutMs);
-      const cleanup = () => {
-        clearTimeout(timer);
-        socket.off('connect', onConnect);
-        socket.off('error', onError);
-      };
-      const onConnect = () => {
-        cleanup();
-        resolve();
-      };
-      const onError = (error) => {
-        cleanup();
-        reject(error);
-      };
-      socket.once('connect', onConnect);
-      socket.once('error', onError);
-    });
+    this.socketPaths.set(socket, path);
+    this.connectingSocket = socket;
+    try {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => fail(new Error('Timed out connecting to Desktop app tools pipe')), this.connectTimeoutMs);
+        const cleanup = () => {
+          clearTimeout(timer);
+          socket.off('connect', onConnect);
+          socket.off('error', onError);
+          socket.off('close', onClose);
+        };
+        const onConnect = () => {
+          cleanup();
+          resolve();
+        };
+        const fail = (error) => {
+          cleanup();
+          socket.destroy();
+          reject(error);
+        };
+        const onError = (error) => fail(error);
+        const onClose = () => fail(new Error('Desktop app tools pipe closed while connecting'));
+        socket.once('connect', onConnect);
+        socket.once('error', onError);
+        socket.once('close', onClose);
+      });
+    } catch (error) {
+      this.#markFailedPipe(socket);
+      throw error;
+    } finally {
+      if (this.connectingSocket === socket) this.connectingSocket = null;
+    }
     if (this.stopped) {
       socket.destroy();
       throw new Error('Desktop app tools client is stopped');
@@ -84,11 +102,15 @@ export class DesktopAppToolsClient {
     socket.on('data', (chunk) => this.#onData(socket, chunk));
     socket.on('error', (error) => this.#disconnect(socket, error));
     socket.on('close', () => this.#disconnect(socket, new Error('Desktop app tools pipe closed')));
+    this.emit('connected');
   }
 
-  async request(method, params = {}, { timeoutMs = this.requestTimeoutMs } = {}) {
-    await this.connect();
+  async request(method, params = {}, { timeoutMs = this.requestTimeoutMs, expectedSocket = null } = {}) {
+    // A tool namespace belongs to one connection. Never reconnect and replay a
+    // tools/call after its original connection has gone away.
+    if (!expectedSocket) await this.connect();
     const socket = this.socket;
+    if (expectedSocket && socket !== expectedSocket) throw new Error('Desktop connection changed before sending; please retry');
     if (!socket || socket.destroyed) throw new Error('Desktop app tools pipe is not connected');
     const id = this.nextId++;
     const payload = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id, method, params }), 'utf8');
@@ -113,19 +135,42 @@ export class DesktopAppToolsClient {
     });
   }
 
-  async listTools() {
+  async listTools({ refresh = false, timeoutMs = this.requestTimeoutMs } = {}) {
+    await this.connect();
+    if (refresh) this.toolsPromise = null;
     if (!this.toolsPromise) {
-      this.toolsPromise = this.request('tools/list', { threadStartKind: 'all' })
+      const socket = this.socket;
+      const promise = this.request('tools/list', { threadStartKind: 'all' }, { timeoutMs, expectedSocket: socket })
         .then((result) => {
-          const tools = Array.isArray(result?.tools) ? result.tools : [];
-          return new Map(tools.map((tool) => [tool.name, tool]));
+          if (!Array.isArray(result?.tools)) throw new Error('Desktop returned an invalid tools list');
+          const tools = result.tools;
+          const mapped = new Map(tools.map((tool) => [tool.name, tool]));
+          this.toolConnections.set(mapped, socket);
+          return mapped;
         })
         .catch((error) => {
-          this.toolsPromise = null;
+          if (this.toolsPromise === promise) this.toolsPromise = null;
           throw error;
         });
+      this.toolsPromise = promise;
     }
     return this.toolsPromise;
+  }
+
+  async checkConnection({ timeoutMs = 5_000 } = {}) {
+    await this.connect();
+    const socket = this.socket;
+    try {
+      const tools = await this.listTools({ refresh: true, timeoutMs });
+      if (this.socket !== socket || !this.connected) throw new Error('Desktop connection changed during health check');
+      if (!tools.has('list_threads') || !tools.has('send_message_to_thread')) {
+        throw new Error('Desktop control tools are unavailable on this connection');
+      }
+      this.failedPipePaths.clear();
+    } catch (error) {
+      this.#disconnect(socket, error);
+      throw error;
+    }
   }
 
   listThreads(args = {}, contextThreadId = this.contextThreadId) {
@@ -134,6 +179,10 @@ export class DesktopAppToolsClient {
 
   listProjects(args = {}, contextThreadId = this.contextThreadId) {
     return this.#callTool('list_projects', args, contextThreadId);
+  }
+
+  getUsageLimits(args = {}, contextThreadId = this.contextThreadId) {
+    return this.#callTool('get_usage_limits', args, contextThreadId);
   }
 
   createThread(args, contextThreadId = this.contextThreadId) {
@@ -157,16 +206,20 @@ export class DesktopAppToolsClient {
       throw new Error(`Desktop app tool ${name} requires a context thread ID`);
     }
     const tools = await this.listTools();
+    const socket = this.toolConnections.get(tools);
     const tool = tools.get(name);
     if (!tool) throw new Error(`Desktop app tool is unavailable: ${name}`);
     return this.request('tools/call', {
       arguments: args ?? {},
+      // Desktop 26.924 requires the backing task source on the call envelope.
+      // This bridge controls local Codex tasks, not ChatGPT conversations.
+      callerSource: 'codex',
       callId: `mobile-${name}-${randomUUID()}`,
       namespace: tool.namespace,
       threadId: contextThreadId.trim(),
       tool: name,
       turnId: `mobile-${randomUUID()}`,
-    });
+    }, { expectedSocket: socket });
   }
 
   close() {
@@ -176,6 +229,7 @@ export class DesktopAppToolsClient {
     this.connectPromise = null;
     this.toolsPromise = null;
     this.buffer = Buffer.alloc(0);
+    this.connectingSocket?.destroy();
     if (socket && !socket.destroyed) socket.destroy();
     this.#rejectPending(new Error('Desktop app tools client closed'));
   }
@@ -207,6 +261,11 @@ export class DesktopAppToolsClient {
         const error = new Error(message.error.message || `${pending.method} failed`);
         error.code = message.error.code;
         error.data = message.error.data;
+        if (message.error.code === -32602 && message.error.message === 'Invalid app tool request') {
+          error.message = '桌面 Codex 拒绝了 Bridge 的调用格式，可能需要适配当前版本；无需接管任务或关闭桌面 Codex。';
+          error.publicCode = 'DESKTOP_TOOL_PROTOCOL_MISMATCH';
+          error.statusCode = 502;
+        }
         pending.reject(error);
       } else {
         pending.resolve(message.result);
@@ -215,7 +274,8 @@ export class DesktopAppToolsClient {
   }
 
   #disconnect(socket, error) {
-    if (socket !== this.socket) return;
+    if (!socket || socket !== this.socket) return;
+    this.#markFailedPipe(socket);
     this.socket = null;
     this.buffer = Buffer.alloc(0);
     this.toolsPromise = null;
@@ -226,6 +286,17 @@ export class DesktopAppToolsClient {
       clearTimeout(pending.timer);
       pending.reject(error);
     }
+    this.emit('disconnected', error);
+  }
+
+  #markFailedPipe(socket) {
+    const path = this.socketPaths.get(socket);
+    if (path) {
+      this.failedPipePaths.delete(path);
+      this.failedPipePaths.add(path);
+    }
+    // Match the discovery limit so earlier failures cannot starve later pipes.
+    if (this.failedPipePaths.size > 128) this.failedPipePaths.delete(this.failedPipePaths.values().next().value);
   }
 
   #rejectPending(error) {

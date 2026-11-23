@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0d1117">
+  <meta name="color-scheme" content="dark light">
+  <meta name="referrer" content="no-referrer">
+  <title>Markdown 预览 · Codex Mobile</title>
+  <link rel="stylesheet" href="markdown.css">
+  <script src="vendor/markdown-it.min.js"></script>
+  <script type="module" src="markdown.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="index.html" aria-label="返回 Codex Mobile">
+      <span class="brand-mark" aria-hidden="true">C</span>
+      <span class="brand-name">Codex Mobile</span>
+    </a>
+    <div class="document-heading">
+      <p class="eyebrow">MARKDOWN 预览</p>
+      <h1 id="document-title">未命名文档</h1>
+      <p id="document-status" class="document-status" aria-live="polite">输入文字、打开文件，或拖放一个 Markdown 文件</p>
+    </div>
+    <div class="topbar-actions">
+      <button id="theme" class="icon-button" type="button" aria-label="主题：跟随系统" title="主题：跟随系统">◐</button>
+      <a class="back-link" href="index.html">返回会话</a>
+    </div>
+  </header>
+
+  <main class="page-shell">
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+
+    <section id="login-panel" class="login-panel" aria-labelledby="login-heading" hidden>
+      <div class="login-copy">
+        <h2 id="login-heading">需要登录才能打开此文件</h2>
+        <p>输入这台电脑的访问密码，登录后会自动重试。</p>
+      </div>
+      <form id="login-form" class="login-form">
+        <label class="visually-hidden" for="login-password">访问密码</label>
+        <input id="login-password" name="password" type="password" autocomplete="current-password" required placeholder="访问密码">
+        <button class="button primary-button" type="submit">登录并打开</button>
+      </form>
+      <p id="login-error" class="login-error" role="alert" hidden></p>
+    </section>
+
+    <section class="toolbar" aria-label="文档操作">
+      <div class="toolbar-primary">
+        <button id="open-file" class="button primary-button" type="button">打开文件</button>
+        <button id="copy-source" class="button" type="button" disabled>复制源码</button>
+        <button id="download-source" class="button" type="button" disabled>下载 .md</button>
+        <input id="file-picker" class="visually-hidden" type="file" accept=".md,.markdown,.mdown,.txt,text/markdown,text/plain">
+      </div>
+      <div class="view-switch" role="group" aria-label="显示方式">
+        <button class="view-button" type="button" data-view="source" aria-pressed="false">源码</button>
+        <button class="view-button" type="button" data-view="split" aria-pressed="true">分屏</button>
+        <button class="view-button" type="button" data-view="preview" aria-pressed="false">预览</button>
+      </div>
+    </section>
+
+    <p class="sample-download">想先试一下？<a id="download-example" href="examples/markdown-viewer-test.md" download="markdown-viewer-test.md">下载测试文件</a>，然后点“打开文件”选择它。</p>
+
+    <section id="workspace" class="workspace" data-view="split" aria-label="Markdown 编辑与预览">
+      <section class="pane source-pane" aria-labelledby="source-heading">
+        <div class="pane-heading">
+          <div>
+            <h2 id="source-heading">Markdown 源码</h2>
+            <p id="source-hint">文字会即时显示在预览中</p>
+          </div>
+          <span id="source-size" class="pane-meta">0 B</span>
+        </div>
+        <textarea id="source" class="source-editor" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Markdown 源码" placeholder="在这里输入或粘贴 Markdown，也可以打开本地文件。"></textarea>
+      </section>
+
+      <section class="pane preview-pane" aria-labelledby="preview-heading">
+        <div class="pane-heading">
+          <div>
+            <h2 id="preview-heading">预览</h2>
+            <p>远程图片仅在使用 HTTPS 或 HTTP 链接时加载</p>
+          </div>
+          <span class="preview-indicator"><span aria-hidden="true"></span>实时</span>
+        </div>
+        <article id="preview" class="markdown-body" aria-label="渲染后的 Markdown 内容">
+          <div class="empty-preview">
+            <span class="empty-icon" aria-hidden="true">M↓</span>
+            <p>预览会显示在这里</p>
+            <span>粘贴文字、打开文件，或拖放 Markdown 文件</span>
+          </div>
+        </article>
+      </section>
+    </section>
+  </main>
+
+  <div id="drop-overlay" class="drop-overlay" aria-hidden="true" hidden>
+    <div class="drop-card">
+      <span class="drop-icon" aria-hidden="true">↓</span>
+      <strong>放开以打开 Markdown 文件</strong>
+      <span>支持 .md、.markdown、.mdown 和 .txt</span>
+    </div>
+  </div>
+</body>
+</html>

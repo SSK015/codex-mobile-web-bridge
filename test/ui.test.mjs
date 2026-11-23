@@ -2,8 +2,23 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
 const stylesheet = fs.readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
+const appSource = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 assert.match(stylesheet, /\.messages-shell\s*\{[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;/);
 assert.match(stylesheet, /\.messages\s*\{[^}]*max-width:\s*100%;[^}]*min-width:\s*0;/);
+assert.match(stylesheet, /@media \(max-width: 720px\)\s*\{\s*\.turn-block\s*\{[^}]*content-visibility:\s*visible;[^}]*contain-intrinsic-size:\s*none;/);
+// Scroll containers must stay inside a bounded desktop grid, including when
+// optional notices/activity/attachments are hidden. No browser layout engine
+// is available in this DOM mock, so these assert the CSS placement contract.
+assert.match(stylesheet, /\bmain\s*\{[^}]*grid-template-rows:\s*minmax\(0,\s*1fr\)/);
+assert.match(stylesheet, /\.conversation\s*\{[^}]*min-height:\s*0;[^}]*overflow:\s*hidden;/);
+assert.match(stylesheet, /\.thread-list\s*\{[^}]*flex:\s*1;[^}]*min-height:\s*0;[^}]*overflow-y:\s*auto;/);
+assert.match(stylesheet, /\.thread-view\s*\{[^}]*min-height:\s*0;[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\) auto auto auto auto auto;/);
+for (const [index, name] of ['thread-heading', 'notice', 'messages-shell', 'approvals', 'turn-activity', 'attachments', 'turn-options', 'composer'].entries()) {
+  assert.match(stylesheet, new RegExp(`\\.thread-view\\s*>\\s*\\.${name}\\s*\\{\\s*grid-row:\\s*${index + 1};`));
+}
+const bootSource = appSource.slice(appSource.indexOf('async function boot()'));
+assert.ok(bootSource.indexOf('connectEvents();') < bootSource.indexOf('const initialData = loadInitialData();'));
+assert.match(bootSource, /function recoverAfterDesktopReady\(\)[\s\S]*loadThreadReadOnly/);
 
 class FakeClassList {
   constructor(node) {
@@ -72,7 +87,26 @@ class FakeNode {
     this.append(...nodes);
   }
 
-  addEventListener() {}
+  insertBefore(node, before) {
+    if (node === before) return node;
+    if (node.parentNode) node.remove();
+    const index = before ? this.children.indexOf(before) : this.children.length;
+    this.children.splice(index, 0, node);
+    node.parentNode = this;
+    return node;
+  }
+
+  // Listeners are recorded so a test can fire a real toggle/click and assert
+  // what the handler did; nothing else in the suite dispatches them.
+  addEventListener(type, listener) {
+    if (!this.listeners) this.listeners = new Map();
+    if (!this.listeners.has(type)) this.listeners.set(type, []);
+    this.listeners.get(type).push(listener);
+  }
+
+  dispatch(type, event = {}) {
+    for (const listener of this.listeners?.get(type) || []) listener(event);
+  }
   remove() {
     if (!this.parentNode) return;
     this.parentNode.children = this.parentNode.children.filter((child) => child !== this);
@@ -144,6 +178,7 @@ class FakeNode {
 
 const queriedNodes = new Map();
 const allDescendants = (node) => (node?.children || []).flatMap((child) => [child, ...allDescendants(child)]);
+const documentListeners = new Map();
 globalThis.document = {
   visibilityState: 'visible',
   hidden: false,
@@ -154,7 +189,12 @@ globalThis.document = {
   },
   createElement(tagName) { return new FakeNode(tagName); },
   createTextNode(text) { return new FakeNode('', String(text)); },
-  addEventListener() {},
+  // Listeners are recorded so a test can fire the handler the page really
+  // registered; nothing else in the suite dispatches them.
+  addEventListener(type, listener) {
+    if (!documentListeners.has(type)) documentListeners.set(type, []);
+    documentListeners.get(type).push(listener);
+  },
 };
 const windowListeners = new Map();
 globalThis.window = {
@@ -183,14 +223,140 @@ globalThis.requestAnimationFrame = (callback) => callback();
 globalThis.CSS = { escape: (value) => String(value) };
 globalThis.fetch = async () => ({ ok: false, status: 401, json: async () => ({ error: 'test' }) });
 
-const { renderMarkdown, renderMessageImages, renderArtifacts, clipboardImageFiles, prepareClipboardImages, updateLiveToolGroup, openThread, handleEvent, syncComposerState, loadOlderTurns, updateJumpBottom, scrollBottom, isThreadNotFoundMessage, clearStaleThreadNotFoundNotice, state } = await import('../public/app.js');
+const {
+  renderMarkdown,
+  renderMessageImages,
+  renderArtifacts,
+  clipboardImageFiles,
+  prepareClipboardImages,
+  updateLiveToolGroup,
+  openThread,
+  handleEvent,
+  syncComposerState,
+  loadOlderTurns,
+  updateJumpBottom,
+  scrollBottom,
+  isThreadNotFoundMessage,
+  clearStaleThreadNotFoundNotice,
+  threadHasRunningTurn,
+  reconcileActiveTurnFromThread,
+  threadSnapshotSignature,
+  formatUsageWindowLabel,
+  renderUsageLimits,
+  readDesktopReady,
+  setOnline,
+  setDesktopReady,
+  refreshConnectionStatus,
+  state,
+} = await import('../public/app.js');
+assert.equal(formatUsageWindowLabel(300), '5 小时窗口');
+assert.equal(formatUsageWindowLabel(10080), '7 天窗口');
+assert.equal(readDesktopReady({ ready: true }), true);
+assert.equal(readDesktopReady({ desktopReady: false, ready: true }), false);
+assert.equal(readDesktopReady({}), null);
+setOnline(true);
+setDesktopReady(false);
+assert.equal(queriedNodes.get('#connection').textContent, '桌面未连接');
+assert.ok(queriedNodes.get('#connection').classList.contains('desktop-offline'));
+assert.ok(!queriedNodes.get('#connection').classList.contains('online'));
+// An SSE reconnect must not make an explicitly offline desktop appear online.
+setOnline(true);
+assert.equal(queriedNodes.get('#connection').textContent, '桌面未连接');
+state.statusRefreshInFlight = true;
+state.bootInFlight = true;
+handleEvent({ type: 'appServerError', message: 'tool failed' });
+assert.equal(queriedNodes.get('#connection').textContent, '桌面未连接');
+handleEvent({ type: 'appServerReady' });
+state.statusRefreshInFlight = false;
+state.bootInFlight = false;
+assert.equal(queriedNodes.get('#connection').textContent, '在线');
+assert.ok(queriedNodes.get('#connection').classList.contains('online'));
+assert.equal(state.desktopRecoveryPending, true);
+state.desktopRecoveryPending = false;
+setOnline(false);
+assert.equal(queriedNodes.get('#connection').textContent, '状态未知');
+
+state.activeTurnId = null;
+state.activeTurnThreadId = null;
+reconcileActiveTurnFromThread({
+  id: 'cold-boot-thread',
+  status: 'inProgress',
+  turns: [{ id: 'cold-boot-turn', status: 'inProgress', items: [] }],
+}, 'cold-boot-thread');
+assert.equal(state.activeTurnId, 'cold-boot-turn');
+assert.equal(state.activeTurnThreadId, 'cold-boot-thread');
+state.activeTurnId = null;
+state.activeTurnThreadId = null;
+
+const originalFetch = globalThis.fetch;
+let resolveStatus;
+globalThis.fetch = async (url) => {
+  if (url === 'api/status') return new Promise((resolve) => { resolveStatus = resolve; });
+  return originalFetch(url);
+};
+setOnline(true);
+setDesktopReady(true);
+const staleStatus = refreshConnectionStatus();
+setDesktopReady(false);
+resolveStatus({ ok: true, status: 200, json: async () => ({ ready: true }) });
+await staleStatus;
+assert.equal(state.desktopReady, false);
+globalThis.fetch = originalFetch;
+renderUsageLimits({
+  available: true,
+  limits: [{ id: 'codex', planType: 'pro', primary: { usedPercent: 1, remainingPercent: 99, windowDurationMins: 10080, resetsAt: 2_000_000_000 } }],
+  resetCredits: { availableCount: 0 },
+});
+assert.ok(document.querySelector('#usage-panel').textContent.includes('Codex'));
+assert.ok(document.querySelector('#usage-panel').textContent.includes('剩余 99%'));
+assert.ok(document.querySelector('#usage-panel').textContent.includes('7 天窗口'));
+assert.equal(threadHasRunningTurn({ turns: [{ status: 'interrupted' }] }), false);
+assert.equal(threadHasRunningTurn({ turns: [{ status: 'inProgress' }] }), true);
+assert.equal(threadHasRunningTurn({ status: { type: 'active' }, turns: [] }), true);
+assert.notEqual(
+  threadSnapshotSignature({ id: 'signature-test', updatedAt: 1, turns: [{ id: 'turn-1', status: 'completed', items: [{ id: 'item-1', type: 'agentMessage', text: 'old' }] }] }),
+  threadSnapshotSignature({ id: 'signature-test', updatedAt: 1, turns: [{ id: 'turn-1', status: 'completed', items: [{ id: 'item-1', type: 'agentMessage', text: 'new' }] }] }),
+);
 assert.equal(history.state.codexMobileView, 'list');
 await openThread('thread-navigation-test');
 assert.equal(history.state.codexMobileView, 'thread');
 assert.ok(document.body.classList.contains('thread-open'));
+assert.ok(!document.querySelector('#retry-resume').classList.contains('hidden'), 'failed open offers retry for protocol errors too');
 history.back();
 assert.equal(history.state.codexMobileView, 'list');
 assert.ok(!document.body.classList.contains('thread-open'));
+
+// Visibility reporting can stall on a mobile connection while history is
+// already available. Rendering must not wait for those acknowledgements.
+const visibilityReports = [];
+const releaseVisibilityReports = [];
+globalThis.fetch = async (url, options = {}) => {
+  if (url === 'api/view-state') {
+    visibilityReports.push(JSON.parse(options.body));
+    return new Promise((resolve) => releaseVisibilityReports.push(() => resolve({ ok: true, json: async () => ({ ok: true }) })));
+  }
+  return { ok: true, json: async () => String(url).endsWith('/resume') ? {
+    thread: {
+      id: 'fast-navigation', status: 'idle',
+      turns: [{ id: 'fast-turn', status: 'completed', items: [{ id: 'fast-answer', type: 'agentMessage', text: 'History is ready' }] }],
+    },
+  } : { data: [] } };
+};
+try {
+  const opening = openThread('fast-navigation');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(queriedNodes.get('#messages').textContent.includes('History is ready'));
+  assert.equal(visibilityReports.length, 3);
+  assert.equal(visibilityReports[0].visible, false);
+  assert.equal(visibilityReports[1].threadId, 'fast-navigation');
+  assert.ok(visibilityReports.every((report, index) => index === 0 || report.sequence > visibilityReports[index - 1].sequence));
+  for (const release of releaseVisibilityReports) release();
+  await opening;
+  history.back();
+} finally {
+  for (const release of releaseVisibilityReports) release();
+  globalThis.fetch = originalFetch;
+}
 
 state.activeThread = { id: 'jump-bottom-test' };
 const messagePane = document.querySelector('#messages');
@@ -313,6 +479,27 @@ assert.equal(artifactRoot.querySelector('.artifact-info strong').textContent, 'r
 assert.ok(artifactRoot.textContent.includes('1.5 MB'));
 assert.equal(allDescendants(artifactRoot).filter((node) => node.className === 'artifact-action').length, 1);
 assert.equal(allDescendants(artifactRoot).filter((node) => String(node.className).includes('primary-link')).length, 1);
+assert.equal(artifactRoot.querySelector('.artifact-action').href, 'api/artifacts/opaque-preview-token');
+
+const markdownToken = 'a'.repeat(48);
+const markdownArtifact = new FakeNode('div');
+renderArtifacts(markdownArtifact, [{
+  name: '设计 & notes.MD', extension: 'MD', size: 128, previewable: true,
+  previewUrl: `api/artifacts/${markdownToken}`, downloadUrl: `api/artifacts/${markdownToken}?download=1`,
+}]);
+const markdownPreview = markdownArtifact.querySelector('.artifact-action');
+const markdownLink = new URL(markdownPreview.href, 'https://bridge.example/codex-mobile/');
+assert.equal(markdownLink.pathname, '/codex-mobile/markdown.html');
+assert.equal(markdownLink.searchParams.get('artifact'), markdownToken);
+assert.equal(markdownLink.searchParams.get('name'), '设计 & notes.MD');
+assert.equal(markdownPreview.target, '_blank');
+assert.equal(markdownPreview.rel, 'noopener noreferrer');
+const extendedMarkdown = new FakeNode('div');
+renderArtifacts(extendedMarkdown, [{
+  name: 'notes.markdown', extension: 'MARKDOWN', size: 128, previewable: false,
+  previewUrl: `api/artifacts/${markdownToken}`, downloadUrl: `api/artifacts/${markdownToken}?download=1`,
+}]);
+assert.ok(extendedMarkdown.querySelector('.artifact-action').href.startsWith('markdown.html?'));
 
 const clipboardPng = { name: 'image.png', type: 'image/png', size: 128, lastModified: 42 };
 const duplicateClipboardPng = { name: 'image.png', type: 'image/png', size: 128, lastModified: 42 };
@@ -444,6 +631,19 @@ assert.equal(pagerChildren[1].dataset.turnId, 'older-turn');
 assert.equal(pagerChildren[2].dataset.turnId, 'recent-turn');
 assert.equal(state.activeThread.turns.map((turn) => turn.id).join(','), 'older-turn,recent-turn');
 assert.ok(queriedNodes.get('#messages').querySelector('[data-item-id="older-agent"]'));
+const loadedPager = state.historyPager;
+const olderMessage = queriedNodes.get('#messages').querySelector('[data-item-id="older-agent"]');
+handleEvent({
+  type: 'threadSnapshot',
+  thread: {
+    id: 'thread-history-pager', eventSequence: 21, hasOlderTurns: true, olderTurnsCursor: 'cursor-page-2',
+    turns: [{ id: 'recent-turn', items: [{ id: 'recent-agent', type: 'agentMessage', text: '最近一页更新' }] }],
+  },
+});
+assert.equal(state.historyPager, loadedPager, 'background snapshots retain the active history pager');
+assert.equal(state.historyPager.cursor, 'cursor-page-3');
+assert.equal(state.activeThread.turns.map((turn) => turn.id).join(','), 'older-turn,recent-turn');
+assert.equal(queriedNodes.get('#messages').querySelector('[data-item-id="older-agent"]'), olderMessage);
 
 state.activeThread = { id: 'thread-snapshot-first', turns: [] };
 state.activeTurnId = 'turn-snapshot-first';
@@ -497,6 +697,21 @@ state.activeTurnThreadId = 'thread-background-test';
 handleEvent({ type: 'notification', method: 'turn/completed', params: { threadId: 'thread-background-test', turnId: 'turn-background-test' } });
 assert.equal(state.activeTurnId, null);
 assert.equal(state.activeTurnThreadId, null);
+
+state.activeThread = { id: 'thread-interrupted-snapshot' };
+state.activeTurnId = 'turn-interrupted-snapshot';
+state.activeTurnThreadId = 'thread-interrupted-snapshot';
+handleEvent({
+  type: 'threadSnapshot',
+  thread: {
+    id: 'thread-interrupted-snapshot',
+    status: 'idle',
+    turns: [{ id: 'turn-interrupted-snapshot', status: 'interrupted', items: [] }],
+  },
+});
+assert.equal(state.activeTurnId, null);
+assert.equal(state.activeTurnThreadId, null);
+assert.ok(queriedNodes.get('#turn-activity').classList.contains('hidden'));
 
 state.activeThread = { id: 'thread-composer-test' };
 state.activeTurnId = 'turn-composer-test';

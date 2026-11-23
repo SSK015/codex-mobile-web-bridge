@@ -79,7 +79,7 @@ const modelSchema = {
     thinking: { enum: ['low', 'high'] },
   },
 };
-const tools = ['list_threads', 'list_projects', 'create_thread', 'read_thread', 'send_message_to_thread']
+const tools = ['list_threads', 'list_projects', 'get_usage_limits', 'create_thread', 'read_thread', 'send_message_to_thread']
   .map((name) => ({
     name,
     namespace: 'codex_app',
@@ -89,6 +89,7 @@ const calls = [];
 let sentAt = 0;
 let readAfterSendCount = 0;
 let omitCompletedItems = false;
+let rejectProjectsEnvelope = false;
 
 function currentTurns() {
   if (!sentAt) return [];
@@ -106,6 +107,7 @@ function currentTurns() {
 function toolResult(request) {
   if (request.method === 'tools/list') return { tools };
   assert.equal(request.method, 'tools/call');
+  assert.equal(request.params.callerSource, 'codex', 'Desktop 26.924 requires callerSource for all tool calls');
   const { tool, arguments: args, namespace, threadId: contextThreadId } = request.params;
   calls.push({ tool, args, namespace, contextThreadId });
   assert.equal(namespace, 'codex_app');
@@ -119,6 +121,20 @@ function toolResult(request) {
   if (tool === 'list_projects') {
     return { projects: [{ projectId: 'project-1', name: 'Project one', isGitRepository: false }] };
   }
+  if (tool === 'get_usage_limits') {
+    return {
+      rateLimitsByLimitId: {
+        codex: {
+          limitId: 'codex',
+          planType: 'pro',
+          primary: { usedPercent: 12, windowDurationMins: 10080, resetsAt: 2_000_000_000 },
+          secondary: { usedPercent: null },
+        },
+      },
+      rateLimitResetCredits: { availableCount: 1 },
+      accountId: 'must-not-leak',
+    };
+  }
   if (tool === 'create_thread') {
     assert.equal(args.prompt, 'create integration task');
     assert.equal(args.model, 'gpt-test');
@@ -128,6 +144,18 @@ function toolResult(request) {
   }
   if (tool === 'read_thread') {
     assert.equal(contextThreadId, args.threadId);
+    if (args.threadId === 'oversized-history') {
+      if (args.includeOutputs && args.turnLimit > 1) return {
+        success: true,
+        contentItems: [{ type: 'inputText', text: 'Tool response exceeds the size limit. Request fewer turns or omit outputs.' }],
+      };
+      return {
+        thread: { id: args.threadId, title: 'Large task', status: 'idle' },
+        turns: [{ id: 'large-answer', status: 'completed', items: [{ type: 'agentMessage', text: 'LARGE_HISTORY_RECOVERED' }] }],
+        page: { order: 'newest_first', nextCursor: 'large-older-page' },
+      };
+    }
+    if (args.threadId === 'failed-history' && args.turnLimit > 1) throw new Error('History fixture unavailable');
     return {
       thread: { id: args.threadId, title: 'Desktop controlled task', cwd: root, status: sentAt ? 'active' : 'idle' },
       turns: args.threadId === threadId ? currentTurns() : [],
@@ -143,7 +171,11 @@ function toolResult(request) {
 }
 
 const mockPipe = pipePath();
+const mockSockets = new Set();
 const mock = net.createServer((socket) => {
+  mockSockets.add(socket);
+  socket.on('close', () => mockSockets.delete(socket));
+  socket.on('error', () => {});
   let buffer = Buffer.alloc(0);
   socket.on('data', (chunk) => {
     buffer = Buffer.concat([buffer, chunk]);
@@ -153,6 +185,10 @@ const mock = net.createServer((socket) => {
       const request = JSON.parse(buffer.subarray(4, length + 4).toString());
       buffer = buffer.subarray(length + 4);
       try {
+        if (rejectProjectsEnvelope && request.params?.tool === 'list_projects') {
+          socket.write(frame({ jsonrpc: '2.0', id: request.id, error: { code: -32602, message: 'Invalid app tool request' } }));
+          continue;
+        }
         socket.write(frame({ jsonrpc: '2.0', id: request.id, result: toolResult(request) }));
       } catch (error) {
         socket.write(frame({ jsonrpc: '2.0', id: request.id, error: { code: -32_000, message: error.message } }));
@@ -160,7 +196,6 @@ const mock = net.createServer((socket) => {
     }
   });
 });
-await listen(mock, mockPipe);
 
 const uploadRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-mobile-desktop-control-'));
 const codexHome = path.join(uploadRoot, 'codex-home');
@@ -200,9 +235,19 @@ try {
   child.stdout.on('data', (chunk) => { childOutput += chunk.toString(); });
   child.stderr.on('data', (chunk) => { childOutput += chunk.toString(); });
 
+  await waitFor(bridgeBaseUrl, '/api/status', (body) => body.ready === false);
+  await listen(mock, mockPipe);
   const status = await waitFor(bridgeBaseUrl, '/api/status', (body) => body.ready === true);
   assert.equal(status.appServerTransport, 'desktop-control');
   assert.equal(status.rpcMux, undefined);
+
+  const unopened = await requestJson(`${bridgeBaseUrl}/api/threads/${threadId}/messages`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'not connected yet' }),
+  });
+  assert.equal(unopened.status, 409);
+  assert.equal(unopened.body.code, 'THREAD_NOT_OPEN');
+  assert.doesNotMatch(unopened.body.error, /接管/);
+  assert.equal(calls.filter((call) => call.tool === 'send_message_to_thread').length, 0);
 
   const listed = await requestJson(`${bridgeBaseUrl}/api/threads?limit=20`);
   assert.equal(listed.status, 200);
@@ -212,9 +257,37 @@ try {
   assert.equal(projects.status, 200);
   assert.equal(projects.body.data[0].projectId, 'project-1');
 
+  rejectProjectsEnvelope = true;
+  const invalidEnvelope = await requestJson(`${bridgeBaseUrl}/api/projects`);
+  assert.equal(invalidEnvelope.status, 502);
+  assert.equal(invalidEnvelope.body.code, 'DESKTOP_TOOL_PROTOCOL_MISMATCH');
+  assert.match(invalidEnvelope.body.error, /无需接管/);
+  rejectProjectsEnvelope = false;
+
   const modelOptions = await requestJson(`${bridgeBaseUrl}/api/model-options`);
   assert.deepEqual(modelOptions.body.models, ['gpt-test']);
   assert.deepEqual(modelOptions.body.modelThinking['gpt-test'], ['low', 'high']);
+
+  const usage = await requestJson(`${bridgeBaseUrl}/api/usage`);
+  assert.equal(usage.status, 200);
+  assert.equal(usage.body.limits[0].primary.usedPercent, 12);
+  assert.equal(usage.body.limits[0].primary.remainingPercent, 88);
+  assert.equal(usage.body.limits[0].secondary.remainingPercent, null);
+  assert.equal(usage.body.resetCredits.availableCount, 1);
+  assert.equal('accountId' in usage.body, false);
+
+  const largeHistory = await waitFor(bridgeBaseUrl, '/api/threads/oversized-history', (body) => (
+    !body.thread.historyLoading && JSON.stringify(body).includes('LARGE_HISTORY_RECOVERED')
+  ));
+  assert.equal(largeHistory.thread.olderTurnsCursor, 'large-older-page');
+  assert.ok(calls.some((call) => call.tool === 'read_thread' && call.args.threadId === 'oversized-history'
+    && call.args.includeOutputs === false && call.args.turnLimit === 10));
+  const failedHistory = await waitFor(bridgeBaseUrl, '/api/threads/failed-history', (body) => body.thread.historyError);
+  assert.equal(failedHistory.thread.historyLoading, false, 'a cached history error must not turn back into an endless loading note');
+  const failedReadCount = calls.filter((call) => call.tool === 'read_thread' && call.args.threadId === 'failed-history' && call.args.turnLimit > 1).length;
+  await requestJson(`${bridgeBaseUrl}/api/threads/failed-history`);
+  assert.equal(calls.filter((call) => call.tool === 'read_thread' && call.args.threadId === 'failed-history' && call.args.turnLimit > 1).length,
+    failedReadCount, 'polling an unchanged failed snapshot does not continually reload it');
 
   const created = await requestJson(`${bridgeBaseUrl}/api/threads`, {
     method: 'POST',
@@ -231,6 +304,30 @@ try {
   });
   assert.equal(resumed.status, 200);
   assert.equal(resumed.body.thread.id, threadId);
+
+  // A normal clipboard image must reach disk, rather than throwing before
+  // reading the request body (for example due to an undefined timeout).
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
+  const uploaded = await requestJson(`${bridgeBaseUrl}/api/threads/${threadId}/uploads`, {
+    method: 'POST',
+    headers: { 'content-type': 'image/png', 'x-codex-file-name': encodeURIComponent('clipboard-test.png') },
+    body: png,
+  });
+  assert.equal(uploaded.status, 201, JSON.stringify(uploaded.body));
+  assert.equal(uploaded.body.attachment.name, 'clipboard-test.png');
+  assert.equal(uploaded.body.attachment.size, png.length);
+  assert.equal(uploaded.body.attachment.isImage, true);
+  const uploadFolders = await fs.readdir(uploadRoot, { withFileTypes: true });
+  const storedFiles = [];
+  for (const entry of uploadFolders) {
+    if (!entry.isDirectory() || !/^[a-f0-9]{24}$/.test(entry.name)) continue;
+    const directory = path.join(uploadRoot, entry.name);
+    for (const filename of await fs.readdir(directory)) storedFiles.push(path.join(directory, filename));
+  }
+  assert.equal(storedFiles.length, 1);
+  assert.deepEqual(await fs.readFile(storedFiles[0]), png);
+  const removedUpload = await requestJson(`${bridgeBaseUrl}/api/uploads/${uploaded.body.attachment.id}`, { method: 'DELETE' });
+  assert.equal(removedUpload.status, 200);
 
   const sent = await requestJson(`${bridgeBaseUrl}/api/threads/${threadId}/messages`, {
     method: 'POST',
@@ -262,12 +359,45 @@ try {
   assert.ok(calls.some((call) => call.tool === 'list_threads'));
   assert.ok(calls.some((call) => call.tool === 'read_thread'));
 
+  // A Desktop restart must not bring down HTTP or leave ready=true, and a
+  // rejected offline write must not be queued/replayed after recovery.
+  const eventResponse = await fetch(`${bridgeBaseUrl}/events`);
+  const eventReader = eventResponse.body.getReader();
+  let events = '';
+  const readingEvents = (async () => {
+    while (true) {
+      const { value, done } = await eventReader.read();
+      if (done) return;
+      events += new TextDecoder().decode(value);
+    }
+  })();
+  for (const socket of mockSockets) socket.destroy();
+  await new Promise((resolve) => mock.close(resolve));
+  await waitFor(bridgeBaseUrl, '/api/status', (body) => body.ready === false);
+  const offlineWrite = await requestJson(`${bridgeBaseUrl}/api/threads/${threadId}/messages`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: 'must not queue this offline message' }),
+  });
+  assert.equal(offlineWrite.status, 503);
+  await listen(mock, mockPipe);
+  await waitFor(bridgeBaseUrl, '/api/status', (body) => body.ready === true);
+  assert.equal((await requestJson(`${bridgeBaseUrl}/api/projects`)).status, 200);
+  assert.equal(calls.filter((call) => call.tool === 'send_message_to_thread').length, 1);
+  await delay(50);
+  assert.match(events, /"type":"appServerExit"/);
+  assert.match(events, /"type":"appServerReady"/);
+  await eventReader.cancel();
+  await readingEvents;
+
   console.log(JSON.stringify({
     passed: true,
     transport: completed.appServerTransport,
     turnId,
     reply: 'DESKTOP_CONTROL_SERVER_OK',
     codexChildStarted: false,
+    coldStartOfflineAndAutoRecovery: true,
+    disconnectStatusAndSseRecovery: true,
+    offlineMessageReplayed: false,
   }));
 } finally {
   if (child && !child.killed) child.kill();

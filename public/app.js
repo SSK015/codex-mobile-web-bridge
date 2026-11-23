@@ -47,15 +47,24 @@ const state = {
   canSteer: true,
   canInterrupt: true,
   canCreateThread: true,
+  canViewUsage: true,
   projects: [],
   modelOptions: { models: [], thinking: [], modelThinking: {} },
   eventSource: null,
+  sseConnected: false,
+  desktopReady: null,
+  desktopStatusGeneration: 0,
+  statusRefreshInFlight: false,
+  bootInFlight: false,
+  desktopRecoveryPending: false,
+  desktopRecoveryInFlight: null,
   pendingRequests: new Map(),
   toolAlerts: new Map(),
   streaming: new Map(),
   liveToolGroups: new Map(),
   deferredThreadSnapshot: null,
   threadRefreshTimer: null,
+  threadSnapshotPollInFlight: false,
   threadListRequest: 0,
   threadOpenRequest: 0,
   historyPager: null,
@@ -108,6 +117,11 @@ const elements = {
   requestDrawer: $('#request-drawer'),
   requestDrawerClose: $('#request-drawer-close'),
   requestPanelList: $('#request-panel-list'),
+  usageToggle: $('#usage-toggle'),
+  usageDrawer: $('#usage-drawer'),
+  usageDrawerClose: $('#usage-drawer-close'),
+  usageRefresh: $('#usage-refresh'),
+  usagePanel: $('#usage-panel'),
   newTask: $('#new-task'),
   newTaskDialog: $('#new-task-dialog'),
   newTaskForm: $('#new-task-form'),
@@ -139,32 +153,110 @@ initializeNavigation();
 boot();
 
 async function boot() {
+  state.bootInFlight = true;
   try {
     const status = await api('api/status');
-    setOnline(status.ready);
+    setDesktopReady(readDesktopReady(status));
     state.canSteer = status.capabilities?.steerTurn !== false;
     state.canInterrupt = status.capabilities?.interruptTurn !== false;
     state.canCreateThread = status.capabilities?.createThread !== false;
+    state.canViewUsage = status.capabilities?.usageLimits !== false;
     elements.newTask.classList.toggle('hidden', !state.canCreateThread);
+    elements.usageToggle.classList.toggle('hidden', !state.canViewUsage);
     if (status.activeThreadId) {
       state.activeTurnId = status.activeTurnId;
       state.activeTurnThreadId = status.activeTurnId ? status.activeThreadId : null;
       state.turnActivityPhase = status.activeTurnId ? 'thinking' : null;
     }
-    await Promise.all([loadThreads(), loadModelOptions()]);
+    const initialDesktopReady = state.desktopReady === true;
     connectEvents();
-    await loadApprovals();
+    const initialData = loadInitialData();
     if (history.state?.codexMobileView === 'thread' && history.state.threadId) {
-      await openThread(history.state.threadId, { fromHistory: true });
+      if (initialDesktopReady) await openThread(history.state.threadId, { fromHistory: true });
+      else await loadThreadReadOnly(history.state.threadId);
     }
+    await initialData;
   } catch (error) {
     if (error.status === 401) {
       elements.login.classList.remove('hidden');
       elements.password.focus();
-    } else {
+    } else if (!isDesktopUnavailableError(error)) {
       showNotice(error.message);
     }
+  } finally {
+    const recoverAfterBoot = state.desktopRecoveryPending && state.desktopReady === true;
+    state.desktopRecoveryPending = false;
+    state.bootInFlight = false;
+    if (recoverAfterBoot) recoverAfterDesktopReady().catch(reportInitialLoadError);
   }
+}
+
+function isDesktopUnavailableError(error) {
+  return error?.status === 503
+    || ['DESKTOP_CONTROL_NOT_READY', 'DESKTOP_CONTROL_CONNECTING'].includes(error?.code);
+}
+
+function reportInitialLoadError(error) {
+  if (!isDesktopUnavailableError(error)) showNotice(error.message);
+}
+
+async function loadInitialData({ forceRefresh = false } = {}) {
+  const results = await Promise.allSettled([
+    loadThreads({ forceRefresh }),
+    loadModelOptions(),
+    loadApprovals(),
+  ]);
+  for (const result of results) {
+    if (result.status === 'rejected') reportInitialLoadError(result.reason);
+  }
+  return results;
+}
+
+async function loadThreadReadOnly(threadId) {
+  const requestId = ++state.threadOpenRequest;
+  const result = await api(`api/threads/${encodeURIComponent(threadId)}`);
+  if (requestId !== state.threadOpenRequest) return false;
+  const thread = result.thread;
+  if (!thread) return false;
+  const summary = state.threads.find((candidate) => candidate.id === threadId) || thread;
+  state.activeThread = { ...summary, ...thread };
+  reconcileActiveTurnFromThread(state.activeThread, threadId);
+  document.body.classList.add('thread-open');
+  elements.emptyState.classList.add('hidden');
+  elements.threadView.classList.remove('hidden');
+  elements.threadTitle.textContent = state.activeThread.name || state.activeThread.preview || '未命名 task';
+  elements.threadMeta.textContent = state.activeThread.cwd || threadId;
+  state.liveToolGroups.clear();
+  elements.notice.classList.add('hidden');
+  elements.retryResume.classList.add('hidden');
+  renderThreads();
+  renderThread(state.activeThread);
+  clearStaleThreadNotFoundNotice();
+  syncComposerState();
+  return true;
+}
+
+async function recoverAfterDesktopReady() {
+  if (state.bootInFlight) {
+    state.desktopRecoveryPending = true;
+    return null;
+  }
+  if (state.desktopRecoveryInFlight) return state.desktopRecoveryInFlight;
+  const recovery = (async () => {
+    await loadInitialData({ forceRefresh: true });
+    const threadId = history.state?.codexMobileView === 'thread' ? history.state.threadId : null;
+    if (!threadId) return;
+    if (state.activeThread?.id === threadId) {
+      await refreshActiveThreadSnapshot({ force: true }).catch(reportInitialLoadError);
+    } else {
+      await loadThreadReadOnly(threadId).catch(reportInitialLoadError);
+    }
+  })();
+  const tracked = recovery.finally(() => {
+    if (state.desktopRecoveryInFlight === tracked) state.desktopRecoveryInFlight = null;
+  });
+  state.desktopRecoveryInFlight = tracked;
+  return tracked;
 }
 
 elements.loginForm.addEventListener('submit', async (event) => {
@@ -190,7 +282,12 @@ elements.newTaskProject.addEventListener('change', syncNewTaskEnvironment);
 elements.newTaskModel.addEventListener('change', () => syncThinkingOptions(elements.newTaskModel, elements.newTaskThinking, '沿用默认强度'));
 elements.turnModel.addEventListener('change', () => syncThinkingOptions(elements.turnModel, elements.turnThinking, '强度：沿用当前'));
 elements.newTaskForm.addEventListener('submit', createNewTask);
-elements.refresh.addEventListener('click', () => loadThreads({ forceRefresh: true }));
+elements.refresh.addEventListener('click', () => {
+  const refresh = state.activeThread
+    ? refreshActiveThreadSnapshot({ force: true })
+    : loadThreads({ forceRefresh: true });
+  Promise.resolve(refresh).catch((error) => showNotice(error.message));
+});
 elements.back.addEventListener('click', () => {
   if (history.state?.codexMobileView === 'thread') history.back();
   else showThreadList();
@@ -198,10 +295,24 @@ elements.back.addEventListener('click', () => {
 elements.retryResume.addEventListener('click', () => state.activeThread && openThread(state.activeThread.id));
 elements.messages.addEventListener('scroll', updateJumpBottom, { passive: true });
 elements.jumpBottom.addEventListener('click', jumpToLatest);
-document.addEventListener('visibilitychange', () => reportViewState());
+document.addEventListener('visibilitychange', () => {
+  reportViewState();
+  if (!document.hidden) {
+    refreshActiveThreadSnapshot().catch(() => {});
+    refreshConnectionStatus().catch(() => {});
+  }
+});
 window.addEventListener('pagehide', () => sendViewState(false));
+window.addEventListener('pageshow', () => {
+  refreshConnectionStatus().catch(() => {});
+  refreshActiveThreadSnapshot().catch(() => {});
+});
 window.addEventListener('resize', updateJumpBottom);
 setInterval(() => reportViewState(), 15_000);
+setInterval(() => refreshActiveThreadSnapshot().catch(() => {}), 5_000);
+setInterval(() => {
+  if (!document.hidden) refreshConnectionStatus().catch(() => {});
+}, 10_000);
 elements.imageViewerClose.addEventListener('click', closeImageViewer);
 elements.imageViewer.addEventListener('click', (event) => {
   if (event.target === elements.imageViewer) closeImageViewer();
@@ -313,9 +424,16 @@ elements.requestDrawerClose.addEventListener('click', closeRequestDrawer);
 elements.requestDrawer.addEventListener('click', (event) => {
   if (event.target === elements.requestDrawer) closeRequestDrawer();
 });
+elements.usageToggle.addEventListener('click', openUsageDrawer);
+elements.usageRefresh.addEventListener('click', loadUsageLimits);
+elements.usageDrawerClose.addEventListener('click', closeUsageDrawer);
+elements.usageDrawer.addEventListener('click', (event) => {
+  if (event.target === elements.usageDrawer) closeUsageDrawer();
+});
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && !elements.imageViewer.classList.contains('hidden')) closeImageViewer();
   else if (event.key === 'Escape' && !elements.requestDrawer.classList.contains('hidden')) closeRequestDrawer();
+  else if (event.key === 'Escape' && !elements.usageDrawer.classList.contains('hidden')) closeUsageDrawer();
 });
 
 elements.composer.addEventListener('submit', async (event) => {
@@ -506,7 +624,7 @@ async function openThread(threadId, { fromHistory = false } = {}) {
     if (history.state?.codexMobileView === 'thread') history.replaceState(nextState, '', location.href);
     else history.pushState(nextState, '', location.href);
   }
-  await reportViewState(false);
+  void reportViewState(false);
   if (requestId !== state.threadOpenRequest) return;
   const summary = state.threads.find((thread) => thread.id === threadId) || { id: threadId };
   state.activeThread = summary;
@@ -522,7 +640,7 @@ async function openThread(threadId, { fromHistory = false } = {}) {
   elements.retryResume.classList.add('hidden');
   renderThreads();
   addLoading();
-  await reportViewState();
+  void reportViewState();
   if (requestId !== state.threadOpenRequest) return;
   try {
     const lifecycleGeneration = state.turnLifecycleGeneration;
@@ -549,34 +667,206 @@ async function openThread(threadId, { fromHistory = false } = {}) {
     }
     clearStaleThreadNotFoundNotice();
     syncComposerState();
-    await reportViewState();
+    void reportViewState();
     if (requestId !== state.threadOpenRequest) return;
-    await loadApprovals();
-    if (requestId !== state.threadOpenRequest) return;
-    await loadThreads();
+    const results = await Promise.allSettled([loadApprovals(), loadThreads()]);
+    for (const result of results) {
+      if (requestId !== state.threadOpenRequest) return;
+      if (result.status === 'rejected') reportInitialLoadError(result.reason);
+    }
   } catch (error) {
     if (requestId !== state.threadOpenRequest) return;
-    await reportViewState(false);
+    void reportViewState(false);
     elements.messages.replaceChildren();
+    if (isDesktopUnavailableError(error)) {
+      setDesktopReady(false);
+      await loadThreadReadOnly(threadId).catch(reportInitialLoadError);
+      return;
+    }
     showNotice(error.message);
-    if (error.code === 'ACTIVE_WRITER') elements.retryResume.classList.remove('hidden');
+    elements.retryResume.classList.remove('hidden');
   }
 }
 
-function renderThread(thread, { preserveLiveState = false } = {}) {
+function turnStatusValue(turn) {
+  const status = turn?.status;
+  if (status && typeof status === 'object') return status.type || status.status || status.state || '';
+  return status || '';
+}
+
+function normalizedStatus(value) {
+  const status = value && typeof value === 'object'
+    ? (value.type || value.status || value.state || '')
+    : (value || '');
+  return String(status).toLowerCase().replace(/[^a-z]/g, '');
+}
+
+function isRunningStatus(value) {
+  return ['inprogress', 'running', 'started', 'active'].includes(normalizedStatus(value));
+}
+
+function isSettledStatus(value) {
+  return ['idle', 'complete', 'completed', 'interrupted', 'cancelled', 'canceled', 'failed', 'error'].includes(normalizedStatus(value));
+}
+
+function threadHasRunningTurn(thread) {
+  if (isRunningStatus(thread?.status)) return true;
+  return (thread?.turns || []).some((turn) => {
+    if (isRunningStatus(turnStatusValue(turn))) return true;
+    return (turn?.items || []).some((item) => isRunningStatus(item?.status)
+      || (item?.toolItems || []).some((toolItem) => isRunningStatus(toolItem?.status)));
+  });
+}
+
+function threadHasSettledState(thread) {
+  if (isSettledStatus(thread?.status)) return true;
+  const latestStatus = [...(thread?.turns || [])].reverse().map(turnStatusValue).find((status) => normalizedStatus(status));
+  return isSettledStatus(latestStatus);
+}
+
+function reconcileActiveTurnFromThread(thread, threadId) {
+  const turns = [...(thread?.turns || [])].reverse();
+  const runningTurn = turns.find((turn) => isRunningStatus(turnStatusValue(turn))
+    || (turn?.items || []).some((item) => isRunningStatus(item?.status)
+      || (item?.toolItems || []).some((toolItem) => isRunningStatus(toolItem?.status))));
+  if (threadHasRunningTurn(thread)) {
+    state.activeTurnId = runningTurn?.id
+      || (state.activeTurnThreadId === threadId ? state.activeTurnId : true);
+    state.activeTurnThreadId = threadId;
+    state.turnActivityPhase = state.turnActivityPhase || 'thinking';
+  } else if (state.activeTurnThreadId === threadId && threadHasSettledState(thread)) {
+    clearStaleActiveTurn(threadId);
+  }
+}
+
+function threadSnapshotSignature(thread) {
+  const turns = thread?.turns || [];
+  const recentTurns = turns.slice(-3).map((turn) => ({
+    id: String(turn?.id || ''),
+    status: String(turnStatusValue(turn)),
+    error: String(turn?.error || ''),
+    items: (turn?.items || []).slice(-12).map((item) => {
+      let serialized = '';
+      try { serialized = JSON.stringify(item); } catch { serialized = String(item); }
+      return `${String(item?.id || '')}:${String(item?.type || '')}:${serialized.length}:${serialized.slice(-160)}`;
+    }),
+  }));
+  return JSON.stringify({
+    id: String(thread?.id || ''),
+    status: thread?.status || null,
+    updatedAt: thread?.updatedAt || null,
+    eventSequence: thread?.eventSequence || 0,
+    historyLoading: Boolean(thread?.historyLoading),
+    historyError: String(thread?.historyError || ''),
+    turnCount: turns.length,
+    recentTurns,
+  });
+}
+
+function clearStaleActiveTurn(threadId) {
+  if (!state.activeTurnId || state.activeTurnThreadId !== threadId) return false;
+  state.turnLifecycleGeneration += 1;
+  state.activeTurnId = null;
+  state.activeTurnThreadId = null;
+  state.turnActivityPhase = null;
+  state.streaming.clear();
+  state.liveToolGroups.clear();
+  state.deferredThreadSnapshot = null;
+  syncComposerState();
+  return true;
+}
+
+async function refreshActiveThreadSnapshot({ force = false } = {}) {
+  const threadId = state.activeThread?.id;
+  if (!threadId || document.hidden || state.threadSnapshotPollInFlight) return false;
+  const requestId = state.threadOpenRequest;
+  const sequenceAtRequest = Number(state.activeThread.eventSequence || 0);
+  state.threadSnapshotPollInFlight = true;
+  try {
+    const result = await api(`api/threads/${encodeURIComponent(threadId)}`);
+    const thread = retainLoadedThreadHistory(result.thread);
+    if (!thread || requestId !== state.threadOpenRequest || state.activeThread?.id !== threadId) return false;
+    const currentSequence = Number(state.activeThread.eventSequence || 0);
+    if (currentSequence > sequenceAtRequest && Number(thread.eventSequence || 0) < currentSequence) return false;
+
+    const running = threadHasRunningTurn(thread);
+    const settled = !running && !thread.historyLoading && threadHasSettledState(thread);
+    if (settled) clearStaleActiveTurn(threadId);
+    if (!force && threadSnapshotSignature(state.activeThread) === threadSnapshotSignature(thread)) return false;
+
+    const preserveLiveState = !settled && Boolean(
+      (state.activeTurnId && state.activeTurnThreadId === threadId)
+      || state.streaming.size
+      || state.liveToolGroups.size
+    );
+    if (preserveLiveState) applyDeferredThreadSnapshot(thread);
+    else {
+      state.deferredThreadSnapshot = null;
+      state.activeThread = thread;
+      renderThread(thread);
+    }
+    clearStaleThreadNotFoundNotice();
+    syncComposerState();
+    return true;
+  } finally {
+    state.threadSnapshotPollInFlight = false;
+  }
+}
+
+function reconcileConversationChildren(parent, nodes) {
+  nodes.forEach((node, index) => {
+    if (parent.children[index] !== node) parent.insertBefore(node, parent.children[index] || null);
+  });
+  for (const child of [...parent.children].slice(nodes.length)) child.remove();
+}
+
+function captureConversationPosition(pane = elements.messages) {
+  const position = { scrollTop: pane.scrollTop };
+  if (typeof pane.getBoundingClientRect !== 'function' || typeof pane.querySelectorAll !== 'function') return position;
+  const viewport = pane.getBoundingClientRect();
+  for (const node of pane.querySelectorAll('[data-item-id]')) {
+    const bounds = node.getBoundingClientRect();
+    if (bounds.bottom > viewport.top + 1 && bounds.top < viewport.bottom) {
+      position.itemId = node.dataset.itemId;
+      position.offset = bounds.top - viewport.top;
+      break;
+    }
+  }
+  return position;
+}
+
+function restoreConversationPosition(position, pane = elements.messages) {
+  const anchor = position.itemId && pane.querySelector(`[data-item-id="${CSS.escape(position.itemId)}"]`);
+  pane.scrollTop = anchor
+    ? pane.scrollTop + anchor.getBoundingClientRect().top - pane.getBoundingClientRect().top - position.offset
+    : position.scrollTop;
+  if (pane === elements.messages) {
+    state.followLatest = false;
+    updateJumpBottom();
+  }
+}
+
+function renderThread(thread, { preserveLiveState = false, preserveScrollPosition = !state.followLatest } = {}) {
+  const position = preserveScrollPosition ? captureConversationPosition() : null;
+  const previousTurns = new Map([...elements.messages.children]
+    .filter((node) => node.dataset.turnId)
+    .map((node) => [node.dataset.turnId, node]));
+  const notes = document.createElement('div');
   if (!preserveLiveState) {
     state.streaming.clear();
     state.liveToolGroups.clear();
   }
   elements.threadTitle.textContent = thread.name || thread.preview || '未命名 task';
   elements.threadMeta.textContent = thread.cwd || thread.id;
-  resetHistoryPaging();
-  elements.messages.replaceChildren();
+  const pager = !thread.historyLoading && state.historyPager?.threadId === thread.id
+    && (state.historyPager.cursor || null) === (thread.olderTurnsCursor || null)
+    && (thread.hasOlderTurns || state.historyPager.loadedOlderTurns) ? state.historyPager : null;
+  if (!pager) resetHistoryPaging();
   if (thread.historyLoading) {
     const note = document.createElement('div');
     note.className = 'history-note loading';
     note.textContent = '会话已打开，正在后台加载最近记录…';
-    elements.messages.append(note);
+    notes.append(note);
   }
   if (thread.historyError) {
     const note = document.createElement('div');
@@ -588,48 +878,71 @@ function renderThread(thread, { preserveLiveState = false } = {}) {
     retry.textContent = '重试';
     retry.addEventListener('click', () => openThread(thread.id, { fromHistory: true }));
     note.append(retry);
-    elements.messages.append(note);
+    notes.append(note);
   }
   if (thread.desktopWriter) {
     const note = document.createElement('div');
     note.className = 'history-note desktop-writer-note';
     note.textContent = '桌面正在使用此 task；当前网页可跟随查看，发送需桌面先切换到其他 task。';
-    elements.messages.append(note);
+    notes.append(note);
   }
-  if (thread.hasOlderTurns && thread.olderTurnsCursor && !thread.historyLoading) {
-    initializeHistoryPaging(thread);
+  if (pager) {
+    notes.append(pager.node);
+    pager.turnIds = new Set((thread.turns || []).map((turn) => String(turn?.id || '')).filter(Boolean));
+  } else if (thread.hasOlderTurns && thread.olderTurnsCursor && !thread.historyLoading) {
+    initializeHistoryPaging(thread, notes);
   } else if (thread.hasOlderTurns && !thread.historyLoading) {
     const note = document.createElement('div');
     note.className = 'history-note';
     note.textContent = '为加快加载，仅显示最近 24 轮；更早记录未加载。';
-    elements.messages.append(note);
+    notes.append(note);
   }
   if (thread.omittedTurnCount > 0) {
     const note = document.createElement('div');
     note.className = 'history-note';
     note.textContent = `为加快加载，仅显示最近 24 轮；已省略更早的 ${thread.omittedTurnCount} 轮。`;
-    elements.messages.append(note);
+    notes.append(note);
   }
-  for (const turn of thread.turns || []) renderTurn(turn);
-  scrollBottom({ force: !preserveLiveState });
+  const turns = (thread.turns || []).map((turn) => renderTurn(turn, null, previousTurns.get(String(turn.id || ''))));
+  reconcileConversationChildren(elements.messages, [...notes.children, ...turns]);
+  if (position) restoreConversationPosition(position);
+  else scrollBottom({ immediate: true });
 }
 
-function renderTurn(turn, target = elements.messages) {
-  const block = document.createElement('section');
+function renderTurn(turn, target = elements.messages, existing = null) {
+  const signature = JSON.stringify(turn);
+  if (existing?._snapshotSignature === signature) {
+    if (target) target.append(existing);
+    return existing;
+  }
+  const block = existing || document.createElement('section');
   block.className = 'turn-block';
   if (turn?.id) block.dataset.turnId = turn.id;
-  for (const item of turn?.items || []) addMessage(item, { target: block, autoScroll: false });
+  const previousItems = new Map([...block.children]
+    .filter((node) => node.dataset.itemId)
+    .map((node) => [node.dataset.itemId, node]));
+  const staging = document.createElement('div');
+  const nodes = (turn?.items || []).map((item) => {
+    const previous = previousItems.get(String(item.id || ''));
+    const itemSignature = JSON.stringify(item);
+    if (previous?._snapshotItemSignature === itemSignature) return previous;
+    const node = addMessage(item, { target: staging, autoScroll: false });
+    if (node) node._snapshotItemSignature = itemSignature;
+    return node;
+  }).filter(Boolean);
   if (turn?.error) {
     const error = document.createElement('div');
     error.className = 'turn-error';
     error.textContent = String(turn.error);
-    block.append(error);
+    nodes.push(error);
   }
-  target.append(block);
+  reconcileConversationChildren(block, nodes);
+  block._snapshotSignature = signature;
+  if (target) target.append(block);
   return block;
 }
 
-function initializeHistoryPaging(thread) {
+function initializeHistoryPaging(thread, target = elements.messages) {
   const node = document.createElement('div');
   node.className = 'history-pager history-note';
   const button = document.createElement('button');
@@ -637,11 +950,12 @@ function initializeHistoryPaging(thread) {
   button.className = 'secondary history-load-older';
   button.textContent = '加载更早记录';
   node.append(button);
-  elements.messages.append(node);
+  target.append(node);
   state.historyPager = {
     threadId: thread.id,
     cursor: thread.olderTurnsCursor,
     loading: false,
+    loadedOlderTurns: false,
     node,
     button,
     turnIds: new Set((thread.turns || []).map((turn) => String(turn?.id || '')).filter(Boolean)),
@@ -667,12 +981,13 @@ async function loadOlderTurns() {
   pager.loading = true;
   pager.button.disabled = true;
   pager.button.textContent = '正在加载更早记录…';
-  const previousHeight = elements.messages.scrollHeight;
-  const previousTop = elements.messages.scrollTop;
   try {
     const params = new URLSearchParams({ cursor: pager.cursor, limit: '12' });
     const result = await api(`api/threads/${encodeURIComponent(pager.threadId)}/turns?${params}`);
     if (state.historyPager !== pager || state.activeThread?.id !== pager.threadId) return;
+    const position = captureConversationPosition();
+    const previousHeight = elements.messages.scrollHeight;
+    const followLatest = state.followLatest;
     const turns = (result.turns || []).filter((turn) => {
       const turnId = String(turn?.id || '');
       if (!turnId || pager.turnIds.has(turnId)) return false;
@@ -683,7 +998,13 @@ async function loadOlderTurns() {
     for (const turn of turns) renderTurn(turn, holder);
     while (holder.lastElementChild) pager.node.after(holder.lastElementChild);
     if (state.activeThread) state.activeThread.turns = [...turns, ...(state.activeThread.turns || [])];
-    pager.cursor = result.olderTurnsCursor || null;
+    pager.cursor = result.hasOlderTurns ? result.olderTurnsCursor || null : null;
+    pager.loadedOlderTurns = true;
+    state.activeThread = {
+      ...state.activeThread,
+      olderTurnsCursor: pager.cursor,
+      hasOlderTurns: Boolean(pager.cursor),
+    };
     if (!pager.cursor || !result.hasOlderTurns) {
       state.historyObserver?.disconnect();
       state.historyObserver = null;
@@ -693,9 +1014,11 @@ async function loadOlderTurns() {
       pager.button.textContent = '加载更早记录';
       pager.button.disabled = false;
     }
-    requestAnimationFrame(() => {
-      elements.messages.scrollTop = previousTop + Math.max(0, elements.messages.scrollHeight - previousHeight);
-    });
+    if (followLatest) scrollBottom({ immediate: true });
+    else {
+      position.scrollTop += Math.max(0, elements.messages.scrollHeight - previousHeight);
+      restoreConversationPosition(position);
+    }
   } catch (error) {
     if (state.historyPager !== pager) return;
     pager.button.textContent = '加载失败，点此重试';
@@ -794,7 +1117,8 @@ function renderArtifacts(container, artifacts) {
     info.append(name, meta);
     const actions = document.createElement('div');
     actions.className = 'artifact-actions';
-    if (artifact.previewable && artifact.previewUrl) {
+    const markdownUrl = markdownArtifactPreviewUrl(artifact);
+    if ((artifact.previewable || markdownUrl) && artifact.previewUrl) {
       if (String(artifact.mimeType || '').startsWith('image/')) {
         const preview = document.createElement('button');
         preview.type = 'button';
@@ -805,7 +1129,7 @@ function renderArtifacts(container, artifacts) {
       } else {
         const preview = document.createElement('a');
         preview.className = 'artifact-action';
-        preview.href = artifact.previewUrl;
+        preview.href = markdownUrl || artifact.previewUrl;
         preview.target = '_blank';
         preview.rel = 'noopener noreferrer';
         preview.textContent = '预览';
@@ -822,6 +1146,15 @@ function renderArtifacts(container, artifacts) {
     list.append(card);
   }
   if (list.childElementCount > 0) container.append(list);
+}
+
+function markdownArtifactPreviewUrl(artifact) {
+  const isMarkdown = /\.(?:md|markdown|mdown)$/i.test(String(artifact?.name || ''))
+    || /^(?:MD|MARKDOWN|MDOWN)$/i.test(String(artifact?.extension || ''));
+  if (!isMarkdown) return null;
+  const match = String(artifact?.previewUrl || '').match(/^api\/artifacts\/([a-zA-Z0-9_-]{40,2048})$/);
+  if (!match) return null;
+  return `markdown.html?${new URLSearchParams({ artifact: match[1], name: String(artifact.name || 'document.md') })}`;
 }
 
 function formatBytes(value) {
@@ -1527,9 +1860,11 @@ function addLoading() {
 
 function connectEvents() {
   state.eventSource?.close();
+  setOnline(false);
   state.eventSource = new EventSource('events');
   state.eventSource.onopen = () => {
     setOnline(true);
+    refreshConnectionStatus().catch(() => {});
     reconcileBusyStateAfterReconnect().catch(() => {});
   };
   state.eventSource.onerror = () => setOnline(false);
@@ -1564,6 +1899,18 @@ async function reconcileBusyStateAfterReconnect() {
 }
 
 function handleEvent(event) {
+  if (event?.type === 'appServerExit') {
+    setDesktopReady(false);
+    return;
+  }
+  if (event?.type === 'appServerReady') {
+    setDesktopReady(true);
+    refreshConnectionStatus().catch(() => {});
+    recoverAfterDesktopReady().catch(reportInitialLoadError);
+    return;
+  }
+  // Tool failures do not imply that the desktop bridge itself went away.
+  if (event?.type === 'appServerError') return;
   if (event.type === 'threadListUpdated') {
     loadThreads().catch(() => {});
     return;
@@ -1599,13 +1946,17 @@ function handleEvent(event) {
     return;
   }
   if (event.type === 'threadSnapshot' && state.activeThread?.id === event.thread.id) {
-    if (state.activeTurnId && state.activeTurnThreadId === event.thread.id) {
-      applyDeferredThreadSnapshot(event.thread);
+    const thread = retainLoadedThreadHistory(event.thread);
+    const running = threadHasRunningTurn(thread);
+    const settled = !running && !thread.historyLoading && threadHasSettledState(thread);
+    if (settled) clearStaleActiveTurn(thread.id);
+    if (!settled && state.activeTurnId && state.activeTurnThreadId === thread.id) {
+      applyDeferredThreadSnapshot(thread);
       return;
     }
     state.deferredThreadSnapshot = null;
-    state.activeThread = event.thread;
-    renderThread(event.thread);
+    state.activeThread = thread;
+    renderThread(thread);
     clearStaleThreadNotFoundNotice();
     queueThreadRefresh();
     return;
@@ -1747,7 +2098,24 @@ function handleDeletedThread(threadId) {
   syncComposerState();
 }
 
+function retainLoadedThreadHistory(thread) {
+  const pager = state.historyPager;
+  const previous = state.activeThread;
+  if (!thread || !pager?.loadedOlderTurns || pager.threadId !== thread.id || previous?.id !== thread.id) return thread;
+  const firstTurnId = thread.turns?.[0]?.id;
+  const overlap = firstTurnId ? (previous.turns || []).findIndex((turn) => turn.id === firstTurnId) : -1;
+  // Keep only a continuous prefix: never join two pages with a missing gap.
+  if (overlap < 0) return thread;
+  return {
+    ...thread,
+    turns: [...previous.turns.slice(0, overlap), ...thread.turns],
+    hasOlderTurns: Boolean(pager.cursor),
+    olderTurnsCursor: pager.cursor,
+  };
+}
+
 function applyDeferredThreadSnapshot(thread) {
+  thread = retainLoadedThreadHistory(thread);
   const previousHistoryItemIds = new Set((state.activeThread?.turns || [])
     .flatMap((turn) => turn.items || [])
     .map((item) => String(item?.id || ''))
@@ -2398,6 +2766,129 @@ function closeRequestDrawer() {
   elements.requestDrawer.classList.add('hidden');
 }
 
+function formatUsageWindowLabel(minutes) {
+  const value = Number(minutes);
+  if (!Number.isFinite(value) || value <= 0) return '用量窗口';
+  if (value % 10_080 === 0) return `${value / 10_080 * 7} 天窗口`;
+  if (value % 1_440 === 0) return `${value / 1_440} 天窗口`;
+  if (value % 60 === 0) return `${value / 60} 小时窗口`;
+  return `${value} 分钟窗口`;
+}
+
+function formatUsageReset(timestamp) {
+  const value = Number(timestamp);
+  if (!Number.isFinite(value) || value <= 0) return '重置时间未知';
+  const milliseconds = value < 10_000_000_000 ? value * 1000 : value;
+  return `${new Intl.DateTimeFormat('zh-CN', {
+    month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  }).format(new Date(milliseconds))} 重置`;
+}
+
+function buildUsageWindow(window) {
+  const row = document.createElement('div');
+  row.className = 'usage-window';
+  const heading = document.createElement('div');
+  heading.className = 'usage-window-heading';
+  const label = document.createElement('strong');
+  label.textContent = formatUsageWindowLabel(window.windowDurationMins);
+  const remaining = document.createElement('span');
+  const remainingPercent = Number.isFinite(Number(window.remainingPercent))
+    ? Math.max(0, Math.min(100, Number(window.remainingPercent)))
+    : Math.max(0, 100 - Number(window.usedPercent || 0));
+  remaining.textContent = `剩余 ${remainingPercent}%`;
+  heading.append(label, remaining);
+
+  const meter = document.createElement('progress');
+  meter.className = Number(window.usedPercent) >= 90 ? 'usage-meter warning' : 'usage-meter';
+  meter.max = 100;
+  meter.value = Math.max(0, Math.min(100, Number(window.usedPercent || 0)));
+  meter.setAttribute('aria-label', `${label.textContent}已用 ${meter.value}%`);
+
+  const meta = document.createElement('small');
+  meta.textContent = `已用 ${meter.value}% · ${formatUsageReset(window.resetsAt)}`;
+  row.append(heading, meter, meta);
+  return row;
+}
+
+function renderUsageLimits(payload) {
+  elements.usagePanel.replaceChildren();
+  const limits = Array.isArray(payload?.limits) ? payload.limits : [];
+  if (!payload?.available || limits.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'request-panel-empty';
+    empty.textContent = '当前账户没有可显示的额度信息';
+    elements.usagePanel.append(empty);
+    return;
+  }
+  for (const limit of limits) {
+    const card = document.createElement('section');
+    card.className = 'usage-card';
+    const heading = document.createElement('div');
+    heading.className = 'usage-card-heading';
+    const name = document.createElement('strong');
+    name.textContent = limit.name || (limit.id === 'codex' ? 'Codex' : limit.id || 'Codex');
+    const plan = document.createElement('span');
+    plan.textContent = limit.planType ? String(limit.planType).toUpperCase() : '';
+    heading.append(name, plan);
+    card.append(heading);
+    for (const window of [limit.primary, limit.secondary]) {
+      if (window) card.append(buildUsageWindow(window));
+    }
+    if (limit.spendControlReached || limit.rateLimitReachedType) {
+      const warning = document.createElement('div');
+      warning.className = 'usage-warning';
+      warning.textContent = '当前额度已触及限制';
+      card.append(warning);
+    }
+    if (limit.credits?.unlimited || limit.credits?.hasCredits) {
+      const credits = document.createElement('small');
+      credits.className = 'usage-credits';
+      credits.textContent = limit.credits.unlimited
+        ? '额外额度：不限'
+        : `额外额度余额：${limit.credits.balance ?? '未知'}`;
+      card.append(credits);
+    }
+    elements.usagePanel.append(card);
+  }
+  if (Number(payload?.resetCredits?.availableCount) > 0) {
+    const resetCredits = document.createElement('div');
+    resetCredits.className = 'usage-reset-credits';
+    resetCredits.textContent = `可用额度重置次数：${payload.resetCredits.availableCount}`;
+    elements.usagePanel.append(resetCredits);
+  }
+}
+
+async function loadUsageLimits() {
+  elements.usageRefresh.disabled = true;
+  elements.usageRefresh.textContent = '刷新中';
+  const loading = document.createElement('div');
+  loading.className = 'request-panel-empty';
+  loading.textContent = '正在读取额度…';
+  elements.usagePanel.replaceChildren(loading);
+  try {
+    renderUsageLimits(await api('api/usage'));
+  } catch (error) {
+    const failure = document.createElement('div');
+    failure.className = 'request-panel-empty usage-error';
+    failure.textContent = `额度读取失败：${error.message}`;
+    elements.usagePanel.replaceChildren(failure);
+  } finally {
+    elements.usageRefresh.disabled = false;
+    elements.usageRefresh.textContent = '刷新';
+  }
+}
+
+function openUsageDrawer() {
+  closeRequestDrawer();
+  elements.usageDrawer.classList.remove('hidden');
+  elements.usageDrawerClose.focus();
+  loadUsageLimits();
+}
+
+function closeUsageDrawer() {
+  elements.usageDrawer.classList.add('hidden');
+}
+
 function syncComposerState() {
   const busy = Boolean(state.activeTurnId && state.activeTurnThreadId === state.activeThread?.id);
   if (!busy) {
@@ -2411,9 +2902,11 @@ function syncComposerState() {
     || state.attachments.some((attachment) => ['queued', 'uploading'].includes(attachment.status));
   elements.attach.disabled = state.attachments.length >= 4;
   elements.send.textContent = busy ? (state.canSteer ? '追加' : '运行中') : '发送';
-  elements.prompt.placeholder = busy
-    ? (state.canSteer ? 'Codex 正在工作，可追加指令…' : 'Codex 正在工作；可先输入，完成后再发送…')
-    : '给 Codex 发消息…';
+  elements.prompt.placeholder = state.desktopReady === false
+    ? '桌面未连接；草稿会保留，恢复后可发送…'
+    : busy
+      ? (state.canSteer ? 'Codex 正在工作，可追加指令…' : 'Codex 正在工作；可先输入，完成后再发送…')
+      : '给 Codex 发消息…';
   syncTurnActivity(busy);
 }
 
@@ -2447,9 +2940,72 @@ function resizeComposer() {
   elements.prompt.style.height = `${Math.min(elements.prompt.scrollHeight, 160)}px`;
 }
 
+function readDesktopReady(status) {
+  if (typeof status?.desktopReady === 'boolean') return status.desktopReady;
+  if (typeof status?.ready === 'boolean') return status.ready;
+  return null;
+}
+
+function renderConnectionStatus() {
+  const desktopReady = state.desktopReady;
+  const sseConnected = state.sseConnected;
+  const desktopOnline = desktopReady === true && sseConnected;
+  const desktopOffline = desktopReady === false;
+  const fullyOnline = desktopOnline && sseConnected;
+  let text = '连接中';
+  if (desktopOffline) text = '桌面未连接';
+  else if (desktopOnline) text = '在线';
+  else if (!sseConnected) text = '状态未知';
+  else if (desktopReady == null) text = '正在确认…';
+
+  const detail = desktopOffline
+    ? '桌面端未连接，正在自动重连'
+    : desktopOnline
+      ? '桌面端在线，事件流已连接'
+      : '桌面端状态未知，事件流正在重连';
+
+  elements.connection.textContent = text;
+  elements.connection.classList.toggle('online', fullyOnline);
+  elements.connection.classList.toggle('desktop-online', desktopOnline);
+  elements.connection.classList.toggle('desktop-offline', desktopOffline);
+  elements.connection.classList.toggle('sse-offline', !sseConnected);
+  elements.connection.dataset.desktop = desktopOffline ? 'offline' : desktopOnline ? 'online' : 'unknown';
+  elements.connection.dataset.sse = sseConnected ? 'online' : 'offline';
+  elements.connection.setAttribute('aria-label', detail);
+  elements.connection.title = detail;
+}
+
 function setOnline(online) {
-  elements.connection.textContent = online ? '在线' : '断线';
-  elements.connection.classList.toggle('online', online);
+  state.sseConnected = Boolean(online);
+  renderConnectionStatus();
+}
+
+function setDesktopReady(ready) {
+  if (typeof ready !== 'boolean') return;
+  const changed = state.desktopReady !== ready;
+  state.desktopStatusGeneration += 1;
+  state.desktopReady = ready;
+  renderConnectionStatus();
+  if (changed && state.activeThread) syncComposerState();
+}
+
+async function refreshConnectionStatus() {
+  if (state.statusRefreshInFlight) return null;
+  state.statusRefreshInFlight = true;
+  const requestGeneration = state.desktopStatusGeneration;
+  try {
+    const status = await api('api/status');
+    if (requestGeneration !== state.desktopStatusGeneration) return status;
+    const ready = readDesktopReady(status);
+    if (typeof ready === 'boolean') {
+      const wasReady = state.desktopReady === true;
+      setDesktopReady(ready);
+      if (ready && !wasReady) recoverAfterDesktopReady().catch(reportInitialLoadError);
+    }
+    return status;
+  } finally {
+    state.statusRefreshInFlight = false;
+  }
 }
 
 function showNotice(text) {
@@ -2490,12 +3046,17 @@ function resetConversationScroll() {
   elements.jumpBottom.classList.add('hidden');
 }
 
-function scrollBottom({ force = false } = {}) {
+function scrollBottom({ force = false, immediate = false } = {}) {
   if (!force && !state.followLatest) {
     updateJumpBottom();
     return;
   }
+  // Commit snapshot layout and bottom position together. Otherwise the scroll
+  // event from the old layout can incorrectly turn off followLatest first.
+  if (immediate) elements.messages.scrollTop = elements.messages.scrollHeight;
+  const threadId = state.activeThread?.id;
   requestAnimationFrame(() => {
+    if (state.activeThread?.id !== threadId || (!force && !state.followLatest)) return;
     elements.messages.scrollTop = elements.messages.scrollHeight;
     state.followLatest = true;
     updateJumpBottom();
@@ -2549,4 +3110,4 @@ function debounce(fn, wait) {
   };
 }
 
-export { decodeCharacterReferences, renderMarkdown, renderMessageImages, renderArtifacts, clipboardImageFiles, prepareClipboardImages, updateLiveToolGroup, updateLiveToolProgress, openThread, showThreadList, handleEvent, syncComposerState, loadOlderTurns, updateJumpBottom, scrollBottom, jumpToLatest, isThreadNotFoundMessage, clearStaleThreadNotFoundNotice, state };
+export { decodeCharacterReferences, renderMarkdown, renderMessageImages, renderArtifacts, clipboardImageFiles, prepareClipboardImages, updateLiveToolGroup, updateLiveToolProgress, openThread, showThreadList, handleEvent, syncComposerState, loadOlderTurns, updateJumpBottom, scrollBottom, jumpToLatest, isThreadNotFoundMessage, clearStaleThreadNotFoundNotice, threadHasRunningTurn, reconcileActiveTurnFromThread, threadSnapshotSignature, refreshActiveThreadSnapshot, formatUsageWindowLabel, formatUsageReset, renderUsageLimits, readDesktopReady, renderConnectionStatus, setOnline, setDesktopReady, refreshConnectionStatus, state };

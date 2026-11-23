@@ -55,6 +55,7 @@
     <div class="header-actions">
       <button id="refresh" class="icon-button" aria-label="刷新">↻</button>
       <button id="theme" class="icon-button theme-toggle" type="button" aria-label="Theme: System" title="Theme: System">◐</button>
+      <button id="usage-toggle" class="secondary usage-toggle" type="button" aria-label="查看额度" title="查看当前账户额度">额度</button>
       <button id="requests-toggle" class="secondary request-toggle" type="button">请求 <span id="requests-badge" class="request-badge hidden">0</span></button>
     </div>
   </header>
@@ -67,13 +68,16 @@
       </div>
       <div id="thread-list-status" class="thread-list-status hidden"></div>
       <div id="thread-list" class="thread-list"></div>
+      <nav class="sidebar-tools" aria-label="文件工具">
+        <a href="markdown.html" target="_blank" rel="noopener noreferrer">Markdown 预览 <span aria-hidden="true">↗</span></a>
+      </nav>
     </aside>
 
     <section id="conversation" class="conversation empty">
       <div id="empty-state" class="empty-state">
         <div class="brand-mark">C</div>
         <h2>选择一个 Codex task</h2>
-        <p>手机接管时，桌面端不能同时打开同一 task。</p>
+        <p>打开一个 task，查看记录并继续对话。</p>
       </div>
 
       <div id="thread-view" class="hidden thread-view">
@@ -82,7 +86,7 @@
             <h2 id="thread-title"></h2>
             <p id="thread-meta"></p>
           </div>
-          <button id="retry-resume" class="secondary hidden">重试接管</button>
+          <button id="retry-resume" class="secondary hidden">重试打开</button>
         </div>
         <div id="notice" class="notice hidden"></div>
         <div class="messages-shell">
@@ -129,6 +133,21 @@
         <button id="request-drawer-close" class="icon-button" type="button" aria-label="关闭请求中心">×</button>
       </div>
       <div id="request-panel-list" class="request-panel-list"></div>
+    </section>
+  </div>
+  <div id="usage-drawer" class="request-drawer hidden" role="dialog" aria-modal="true" aria-label="Codex 额度">
+    <section class="request-drawer-card usage-drawer-card">
+      <div class="request-drawer-heading">
+        <div>
+          <strong>使用额度</strong>
+          <span>来自当前登录的 Codex 账户</span>
+        </div>
+        <div class="usage-heading-actions">
+          <button id="usage-refresh" class="secondary" type="button">刷新</button>
+          <button id="usage-drawer-close" class="icon-button" type="button" aria-label="关闭额度面板">×</button>
+        </div>
+      </div>
+      <div id="usage-panel" class="request-panel-list usage-panel"></div>
     </section>
   </div>
   <script type="module" src="app.js"></script>
